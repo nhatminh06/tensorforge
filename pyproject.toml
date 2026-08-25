@@ -1,0 +1,15 @@
+[project]
+name = "tensorforge"
+version = "0.1.0"
+description = "Educational AI-accelerator architecture simulator"
+requires-python = ">=3.12"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
