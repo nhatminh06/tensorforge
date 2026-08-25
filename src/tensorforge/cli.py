@@ -9,6 +9,7 @@ import argparse
 
 from tensorforge.gemm import DType, Gemm
 from tensorforge.hardware import HardwareConfig
+from tensorforge.pe_array import PeArray, map_gemm
 from tensorforge.roofline import compute_roofline
 
 _DTYPE_CHOICES = {"fp32": DType.FP32, "fp16": DType.FP16, "int8": DType.INT8}
@@ -36,11 +37,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Memory bandwidth in GB/s (10^9 bytes/s).",
     )
     parser.add_argument("--name", default="Example Accelerator")
+    parser.add_argument("--pe-rows", type=int, default=None)
+    parser.add_argument("--pe-cols", type=int, default=None)
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    if (args.pe_rows is None) != (args.pe_cols is None):
+        parser.error("--pe-rows and --pe-cols must be provided together")
 
     gemm = Gemm(m=args.m, n=args.n, k=args.k, dtype=_DTYPE_CHOICES[args.dtype])
     hardware = HardwareConfig(
@@ -76,6 +83,29 @@ def main(argv: list[str] | None = None) -> None:
     print(f"  estimated time       {result.estimated_time_seconds:.6e} s")
     print()
     print(f"Primary bound: {result.classification}")
+
+    if args.pe_rows is not None:
+        pe_array = PeArray(rows=args.pe_rows, columns=args.pe_cols)
+        mapping = map_gemm(gemm, pe_array)
+
+        print()
+        print("PE array")
+        print(f"  shape                   {pe_array.rows} x {pe_array.columns}")
+        print(f"  processing elements     {mapping.pe_count:,}")
+        print(f"  peak throughput         {mapping.pe_count:,} MAC/cycle")
+        print()
+        print("Mapping (idealized spatial mapping, M->rows, N->columns)")
+        print(f"  row waves               {mapping.row_waves:,}")
+        print(f"  column waves            {mapping.column_waves:,}")
+        print(f"  total waves             {mapping.waves:,}")
+        print(f"  useful PE slots         {mapping.useful_pe_slots:,}")
+        print(f"  available PE slots      {mapping.available_pe_slots:,}")
+        print(f"  unused PE slots         {mapping.unused_pe_slots:,}")
+        print(f"  spatial utilization     {mapping.spatial_utilization * 100:.2f}%")
+        print()
+        print("Compute (analytical cycles, no memory stalls or pipeline modeled)")
+        print(f"  cycles per wave         {mapping.cycles_per_wave:,}")
+        print(f"  analytical cycles       {mapping.compute_cycles:,}")
 
 
 if __name__ == "__main__":
