@@ -3,6 +3,7 @@ from tensorforge.hardware import HardwareConfig
 from tensorforge.memory import MemoryHierarchy, MemoryResult, analyze_memory
 from tensorforge.pe_array import PeArray, PeMappingResult, map_gemm
 from tensorforge.roofline import RooflineResult, compute_roofline
+from tensorforge.tiling import GemmTile, TilingResult, analyze_tiling
 
 __all__ = [
     "DType",
@@ -16,4 +17,7 @@ __all__ = [
     "map_gemm",
     "RooflineResult",
     "compute_roofline",
+    "GemmTile",
+    "TilingResult",
+    "analyze_tiling",
 ]
