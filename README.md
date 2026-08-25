@@ -6,18 +6,21 @@ capacity. It starts from analytical models and adds architectural detail
 incrementally (PE arrays, memory hierarchy, tiling, dataflows, convolution,
 Transformer operations).
 
-## Current model (Milestone 5)
+## Current model (Milestone 6)
 
 Analytical GEMM + roofline + rectangular PE mapping + SRAM capacity +
 explicit GEMM tiling traffic under three explicit loop-order/residency
-schedules (`c-resident`, `a-resident`, `b-resident`). Tiled DRAM traffic
-is exact only for the specific modeled schedule used — not a claim of
-optimal, universal, or real-hardware GEMM traffic, and not yet a claim
-that these schedules implement general "output/input/weight stationary"
-hardware dataflows. There is no automatic tile/schedule search, no
-systolic timing, and no cycle accuracy. All numbers come from closed-form
-formulas over a `Gemm`, a `HardwareConfig`, an optional `PeArray`, an
-optional `MemoryHierarchy`, and an optional `GemmTile` + `GemmSchedule`.
+schedules (`c-resident`, `a-resident`, `b-resident`) + analytical
+compute/memory execution timing. Tiled DRAM traffic is exact only for the
+specific modeled schedule used — not a claim of optimal, universal, or
+real-hardware GEMM traffic, and not yet a claim that these schedules
+implement general "output/input/weight stationary" hardware dataflows.
+Timing is an idealized bandwidth-only, no-pipeline analytical estimate —
+not measured runtime. There is no automatic tile/schedule/architecture
+search, no systolic timing, and no cycle accuracy. All numbers come from
+closed-form formulas over a `Gemm`, a `HardwareConfig`, an optional
+`PeArray`, an optional `MemoryHierarchy`, an optional `GemmTile` +
+`GemmSchedule`, and an optional `TimingConfig`.
 
 ## Equations
 
@@ -110,6 +113,22 @@ schedule tied for lowest traffic among these three (`best_among_modeled_schedule
 not a claim of global optimality). No automatic tile or schedule search.
 See [docs/schedules.md](docs/schedules.md).
 
+### Execution timing (optional, requires PE array + tiling)
+
+```
+compute_time = compute_cycles / clock_hz
+memory_time  = total_dram_bytes / memory_bandwidth_bytes_per_second   (schedule-specific)
+
+serialized_time      = compute_time + memory_time        (no overlap)
+perfect_overlap_time = max(compute_time, memory_time)     (full overlap)
+```
+
+Combines the existing PE-mapping compute cycles and schedule-specific
+tiled DRAM traffic into two analytical time bounds and a
+compute-bound/memory-bound/balanced classification. `PeArray` gains no
+new fields — clock frequency is a separate `TimingConfig`. See
+[docs/timing.md](docs/timing.md).
+
 ## Build / run
 
 ```bash
@@ -164,6 +183,16 @@ python -m tensorforge --m 4 --n 4 --k 4 --dtype fp32 \
     --tile-m 2 --tile-n 2 --tile-k 2 --compare-schedules
 ```
 
+Add `--clock-ghz` (requires `--pe-rows`/`--pe-cols`, `--tile-m`/`--tile-n`/`--tile-k`,
+and `--sram-kib`; not combinable with `--compare-schedules`) to print
+analytical compute/memory execution timing:
+
+```bash
+python -m tensorforge --m 4 --n 4 --k 4 --dtype fp32 \
+    --peak-tflops 1 --bandwidth-gbps 100 --pe-rows 2 --pe-cols 2 \
+    --sram-kib 0.0625 --tile-m 2 --tile-n 2 --tile-k 2 --clock-ghz 1
+```
+
 ## Limitations
 
 - GEMM only; no convolution or Transformer operations yet.
@@ -186,9 +215,14 @@ python -m tensorforge --m 4 --n 4 --k 4 --dtype fp32 \
 - Schedule names describe the modeled loop order/residency literally, not
   a verified claim of matching general "output/input/weight stationary"
   hardware dataflow definitions.
-- Time estimates are analytical lower bounds under perfect compute/memory
-  overlap, not measured latency. No queueing, contention, pipeline startup,
-  or synchronization overhead is modeled.
+- Roofline time estimates (Milestone 1) are analytical lower bounds under
+  perfect compute/memory overlap, not measured latency.
+- Execution timing (Milestone 6) combines actual modeled PE cycles and
+  schedule-specific tiled traffic into two bounds — serialized (no
+  overlap) and perfect-overlap — not a partial-overlap or scheduling
+  model. Bandwidth-only DRAM timing: no DRAM latency, bank conflicts,
+  burst inefficiency, or controller overhead. No SRAM timing, no PE
+  pipeline fill/drain, no NoC, no power/energy.
 - Not validated against real hardware; not cycle-accurate.
 
 ## Roadmap
