@@ -9,10 +9,20 @@ import argparse
 
 from tensorforge.gemm import DType, Gemm
 from tensorforge.hardware import HardwareConfig
+from tensorforge.memory import MemoryHierarchy, analyze_memory
 from tensorforge.pe_array import PeArray, map_gemm
 from tensorforge.roofline import compute_roofline
 
 _DTYPE_CHOICES = {"fp32": DType.FP32, "fp16": DType.FP16, "int8": DType.INT8}
+_KIB = 1024
+
+
+def _format_bytes(num_bytes: float) -> str:
+    if num_bytes < _KIB:
+        return f"{num_bytes:,.0f} B"
+    if num_bytes < _KIB**2:
+        return f"{num_bytes / _KIB:.2f} KiB"
+    return f"{num_bytes / _KIB**2:.2f} MiB"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -39,6 +49,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--name", default="Example Accelerator")
     parser.add_argument("--pe-rows", type=int, default=None)
     parser.add_argument("--pe-cols", type=int, default=None)
+    parser.add_argument(
+        "--sram-kib",
+        type=float,
+        default=None,
+        help="Modeled global SRAM capacity in KiB (1 KiB = 1024 bytes).",
+    )
     return parser
 
 
@@ -106,6 +122,36 @@ def main(argv: list[str] | None = None) -> None:
         print("Compute (analytical cycles, no memory stalls or pipeline modeled)")
         print(f"  cycles per wave         {mapping.cycles_per_wave:,}")
         print(f"  analytical cycles       {mapping.compute_cycles:,}")
+
+    if args.sram_kib is not None:
+        sram_bytes = round(args.sram_kib * _KIB)
+        hierarchy = MemoryHierarchy(sram_bytes=sram_bytes)
+        mem = analyze_memory(gemm, hierarchy)
+
+        print()
+        print("Memory hierarchy")
+        print(f"  SRAM capacity           {_format_bytes(mem.sram_bytes)}")
+        print()
+        print("Tensor footprint")
+        print(f"  A                       {_format_bytes(mem.a_bytes)}")
+        print(f"  B                       {_format_bytes(mem.b_bytes)}")
+        print(f"  C                       {_format_bytes(mem.c_bytes)}")
+        print(f"  full working set        {_format_bytes(mem.working_set_bytes)}")
+        print()
+        print("Capacity (fit is a capacity fact, not a reuse guarantee)")
+        print(f"  A fits                  {'yes' if mem.a_fits else 'no'}")
+        print(f"  B fits                  {'yes' if mem.b_fits else 'no'}")
+        print(f"  C fits                  {'yes' if mem.c_fits else 'no'}")
+        print(f"  full working set fits   {'yes' if mem.full_working_set_fits else 'no'}")
+        print(f"  capacity headroom       {_format_bytes(mem.capacity_headroom_bytes)}")
+        print(f"  capacity deficit        {_format_bytes(mem.capacity_deficit_bytes)}")
+        print(f"  working-set ratio       {mem.working_set_to_capacity_ratio:.2f}x")
+        print(f"  tiling required         {'yes' if mem.tiling_required else 'no'}")
+        print()
+        print("Baseline modeled DRAM <-> SRAM traffic (idealized, unchanged by fit)")
+        print(f"  reads                   {_format_bytes(mem.dram_read_bytes)}")
+        print(f"  writes                  {_format_bytes(mem.dram_write_bytes)}")
+        print(f"  total                   {_format_bytes(mem.total_dram_bytes)}")
 
 
 if __name__ == "__main__":
