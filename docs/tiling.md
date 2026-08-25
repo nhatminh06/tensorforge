@@ -2,11 +2,13 @@
 
 ## What this models
 
-Given a user-chosen tile shape `(Tm, Tn, Tk)`, this milestone checks
-whether one tile's working set fits the modeled SRAM and computes the
-**exact** DRAM traffic that results from one specific, fixed loop
-schedule. It does not search for a good tile shape, and it does not
-compare loop orders or dataflows — there is exactly one schedule.
+Given a user-chosen tile shape `(Tm, Tn, Tk)`, this checks whether one
+tile's working set fits the modeled SRAM and computes the **exact** DRAM
+traffic that results from one specific loop schedule. It does not search
+for a good tile shape. This document describes the original
+`c-resident` schedule in detail; two additional explicit schedules
+(`a-resident`, `b-resident`) and a side-by-side comparison are covered in
+[docs/schedules.md](schedules.md).
 
 ## Tile dimensions and counts
 
