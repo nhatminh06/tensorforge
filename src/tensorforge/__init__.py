@@ -11,6 +11,7 @@ from tensorforge.tiling import (
     analyze_tiling,
     compare_schedules,
 )
+from tensorforge.timing import ExecutionTimingResult, TimingConfig, estimate_execution_time
 
 __all__ = [
     "DType",
@@ -30,4 +31,7 @@ __all__ = [
     "TilingResult",
     "analyze_tiling",
     "compare_schedules",
+    "ExecutionTimingResult",
+    "TimingConfig",
+    "estimate_execution_time",
 ]

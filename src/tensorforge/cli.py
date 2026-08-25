@@ -13,6 +13,7 @@ from tensorforge.memory import MemoryHierarchy, analyze_memory
 from tensorforge.pe_array import PeArray, map_gemm
 from tensorforge.roofline import compute_roofline
 from tensorforge.tiling import GemmSchedule, GemmTile, analyze_tiling, compare_schedules
+from tensorforge.timing import TimingConfig, estimate_execution_time
 
 _DTYPE_CHOICES = {"fp32": DType.FP32, "fp16": DType.FP16, "int8": DType.INT8}
 _SCHEDULE_CHOICES = {
@@ -29,6 +30,16 @@ def _format_bytes(num_bytes: float) -> str:
     if num_bytes < _KIB**2:
         return f"{num_bytes / _KIB:.2f} KiB"
     return f"{num_bytes / _KIB**2:.2f} MiB"
+
+
+def _format_seconds(seconds: float) -> str:
+    if seconds < 1e-6:
+        return f"{seconds * 1e9:.2f} ns"
+    if seconds < 1e-3:
+        return f"{seconds * 1e6:.2f} us"
+    if seconds < 1:
+        return f"{seconds * 1e3:.2f} ms"
+    return f"{seconds:.2f} s"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -66,6 +77,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tile-k", type=int, default=None)
     parser.add_argument("--schedule", choices=sorted(_SCHEDULE_CHOICES), default=None)
     parser.add_argument("--compare-schedules", action="store_true")
+    parser.add_argument(
+        "--clock-ghz",
+        type=float,
+        default=None,
+        help="Modeled PE clock frequency in GHz (1 GHz = 1e9 Hz), decimal.",
+    )
     return parser
 
 
@@ -89,6 +106,17 @@ def main(argv: list[str] | None = None) -> None:
                 "--schedule/--compare-schedules require --tile-m, --tile-n, "
                 "--tile-k, and --sram-kib"
             )
+
+    if args.clock_ghz is not None:
+        if args.pe_rows is None or any(t is None for t in tile_args) or args.sram_kib is None:
+            parser.error(
+                "--clock-ghz requires --pe-rows/--pe-cols, --tile-m/--tile-n/--tile-k, "
+                "and --sram-kib"
+            )
+        if args.compare_schedules:
+            parser.error("--clock-ghz cannot be combined with --compare-schedules")
+        if args.clock_ghz <= 0:
+            parser.error("--clock-ghz must be > 0")
 
     gemm = Gemm(m=args.m, n=args.n, k=args.k, dtype=_DTYPE_CHOICES[args.dtype])
     hardware = HardwareConfig(
@@ -236,6 +264,34 @@ def main(argv: list[str] | None = None) -> None:
                 print(f"  ideal baseline          {_format_bytes(tiling.ideal_baseline_dram_bytes)}")
                 print(f"  amplification           {tiling.traffic_amplification:.2f}x")
                 print(f"  tiled arithmetic intensity {tiling.effective_arithmetic_intensity:.4f} FLOP/byte")
+
+                if args.clock_ghz is not None:
+                    clock_hz = args.clock_ghz * 1e9
+                    timing_config = TimingConfig(clock_hz=clock_hz)
+                    timing_result = estimate_execution_time(mapping, tiling, hardware, timing_config)
+
+                    print()
+                    print("Execution timing (analytical; no pipeline/memory-stall/NoC modeling)")
+                    print(f"  PE clock                {args.clock_ghz:.2f} GHz")
+                    print(f"  PE compute cycles       {timing_result.compute_cycles:,}")
+                    print(f"  compute time            {_format_seconds(timing_result.compute_time_seconds)}")
+                    print()
+                    print(f"  schedule                {tiling.schedule.value}")
+                    print(f"  modeled DRAM traffic    {_format_bytes(timing_result.dram_bytes)}")
+                    print(
+                        f"  DRAM bandwidth          {timing_result.memory_bandwidth_bytes_per_second / 1e9:.2f} GB/s"
+                    )
+                    print(f"  memory time             {_format_seconds(timing_result.memory_time_seconds)}")
+                    print()
+                    print("Timing bounds")
+                    print(
+                        f"  serialized estimate     {_format_seconds(timing_result.serialized_time_seconds)}"
+                    )
+                    print(
+                        f"  perfect-overlap estimate {_format_seconds(timing_result.perfect_overlap_time_seconds)}"
+                    )
+                    print()
+                    print(f"Primary modeled bound: {timing_result.bottleneck}")
 
 
 if __name__ == "__main__":
