@@ -6,12 +6,14 @@ capacity. It starts from analytical models and adds architectural detail
 incrementally (PE arrays, memory hierarchy, tiling, dataflows, convolution,
 Transformer operations).
 
-## Current model (Milestone 2)
+## Current model (Milestone 3)
 
-Analytical GEMM + roofline + idealized rectangular PE-array mapping. There
-is no SRAM/tiling model, no dataflow, no systolic timing, and no cycle
-accuracy. All numbers come from closed-form formulas over a `Gemm`, a
-`HardwareConfig`, and (optionally) a `PeArray`.
+Analytical GEMM + roofline + rectangular PE mapping + SRAM capacity
+analysis. Exact refetch traffic for SRAM-limited workloads is not modeled
+yet — that is the next milestone (tiling). There is no dataflow, no
+systolic timing, and no cycle accuracy. All numbers come from closed-form
+formulas over a `Gemm`, a `HardwareConfig`, an optional `PeArray`, and an
+optional `MemoryHierarchy`.
 
 ## Equations
 
@@ -58,6 +60,20 @@ compute_cycles = waves * K       (1 MAC/PE/cycle)
 An idealized spatial mapping of GEMM output onto a finite PE array — not a
 systolic-array timing model. See [docs/pe-array.md](docs/pe-array.md).
 
+### SRAM capacity (optional)
+
+```
+working_set_bytes = a_bytes + b_bytes + c_bytes
+full_working_set_fits = working_set_bytes <= sram_bytes
+tiling_required = not full_working_set_fits
+```
+
+Reports whether A, B, C individually and the full working set fit in a
+modeled SRAM capacity — a capacity fact, not a reuse guarantee. Baseline
+DRAM traffic (A+B read, C written) is unchanged regardless of fit; the
+exact extra traffic caused by an SRAM-limited working set requires tiling,
+which is not modeled yet. See [docs/memory.md](docs/memory.md).
+
 ## Build / run
 
 ```bash
@@ -84,15 +100,27 @@ python -m tensorforge --m 128 --n 128 --k 128 --dtype fp16 \
     --peak-tflops 1 --bandwidth-gbps 100 --pe-rows 16 --pe-cols 16
 ```
 
+Add `--sram-kib` (independently of `--pe-rows`/`--pe-cols`) to also print
+the SRAM capacity section:
+
+```bash
+python -m tensorforge --m 128 --n 128 --k 128 --dtype fp16 \
+    --peak-tflops 1 --bandwidth-gbps 100 --sram-kib 128
+```
+
 ## Limitations
 
 - GEMM only; no convolution or Transformer operations yet.
 - DRAM traffic assumes each tensor is fetched/written exactly once — no
-  tiling, no SRAM capacity, no reuse modeling.
+  tiling, no reuse modeling. This baseline traffic does not change even
+  when the working set does not fit in the modeled SRAM.
 - PE-array model is a spatial-mapping + idealized compute-cycle model, not
   a systolic-array timing model: no fill/drain latency, operand
   propagation, memory access, NoC, or synchronization. No clock frequency,
   so results are cycles, not seconds.
+- SRAM model is capacity-only: fit/no-fit and headroom/deficit, not an
+  exact refetch-traffic estimate. No SRAM latency, bandwidth, or
+  SRAM-to-PE traffic modeling.
 - No dataflow modeling.
 - Time estimates are analytical lower bounds under perfect compute/memory
   overlap, not measured latency. No queueing, contention, pipeline startup,
