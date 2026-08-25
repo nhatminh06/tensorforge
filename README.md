@@ -6,16 +6,18 @@ capacity. It starts from analytical models and adds architectural detail
 incrementally (PE arrays, memory hierarchy, tiling, dataflows, convolution,
 Transformer operations).
 
-## Current model (Milestone 4)
+## Current model (Milestone 5)
 
 Analytical GEMM + roofline + rectangular PE mapping + SRAM capacity +
-explicit GEMM tiling traffic. Tiled DRAM traffic is exact only for the
-one fixed output-tile-resident loop schedule currently modeled — not a
-claim of optimal, universal, or real-hardware GEMM traffic. There is no
-alternative dataflow comparison, no systolic timing, and no cycle
-accuracy. All numbers come from closed-form formulas over a `Gemm`, a
-`HardwareConfig`, an optional `PeArray`, an optional `MemoryHierarchy`,
-and an optional `GemmTile`.
+explicit GEMM tiling traffic under three explicit loop-order/residency
+schedules (`c-resident`, `a-resident`, `b-resident`). Tiled DRAM traffic
+is exact only for the specific modeled schedule used — not a claim of
+optimal, universal, or real-hardware GEMM traffic, and not yet a claim
+that these schedules implement general "output/input/weight stationary"
+hardware dataflows. There is no automatic tile/schedule search, no
+systolic timing, and no cycle accuracy. All numbers come from closed-form
+formulas over a `Gemm`, a `HardwareConfig`, an optional `PeArray`, an
+optional `MemoryHierarchy`, and an optional `GemmTile` + `GemmSchedule`.
 
 ## Equations
 
@@ -92,9 +94,21 @@ traffic_amplification = total_dram_bytes / ideal_baseline_dram_bytes
 effective_arithmetic_intensity = flops / total_dram_bytes
 ```
 
-For one explicit user-supplied tile shape and a single fixed
-C-output-tile-resident loop schedule (no automatic tile search, no
-dataflow comparison yet). See [docs/tiling.md](docs/tiling.md).
+For one explicit user-supplied tile shape. See [docs/tiling.md](docs/tiling.md).
+
+### Schedule comparison (optional, requires tiling)
+
+```
+c-resident: A reads = a_bytes*n_tiles, B reads = b_bytes*m_tiles, C reads = 0
+a-resident: A reads = a_bytes,         B reads = b_bytes*m_tiles, C reads = c_bytes*(k_tiles-1)
+b-resident: A reads = a_bytes*n_tiles, B reads = b_bytes,         C reads = c_bytes*(k_tiles-1)
+```
+
+Three explicit loop-order/residency schedules over the *same* GEMM, tile,
+and SRAM — only loop order changes. `compare_schedules` reports every
+schedule tied for lowest traffic among these three (`best_among_modeled_schedules`,
+not a claim of global optimality). No automatic tile or schedule search.
+See [docs/schedules.md](docs/schedules.md).
 
 ## Build / run
 
@@ -140,6 +154,16 @@ python -m tensorforge --m 4 --n 4 --k 4 --dtype fp32 \
     --tile-m 2 --tile-n 2 --tile-k 2
 ```
 
+Add `--schedule {c-resident,a-resident,b-resident}` (defaults to
+`c-resident`, matching Milestone-4 behavior) to pick a residency schedule,
+or `--compare-schedules` to print all three side by side:
+
+```bash
+python -m tensorforge --m 4 --n 4 --k 4 --dtype fp32 \
+    --peak-tflops 1 --bandwidth-gbps 100 --sram-kib 0.0625 \
+    --tile-m 2 --tile-n 2 --tile-k 2 --compare-schedules
+```
+
 ## Limitations
 
 - GEMM only; no convolution or Transformer operations yet.
@@ -153,12 +177,15 @@ python -m tensorforge --m 4 --n 4 --k 4 --dtype fp32 \
   so results are cycles, not seconds.
 - SRAM model is capacity-only: fit/no-fit and headroom/deficit, not an
   exact refetch-traffic estimate on its own.
-- Tiling traffic is exact only under the one fixed C-output-tile-resident
-  loop schedule currently modeled — not optimal, not universal, not
-  real-hardware traffic. Tile shape is always user-supplied; no automatic
-  search. No alternative dataflows yet. No SRAM-to-PE traffic, memory
-  latency, or PE/tile coupling.
-- No dataflow modeling beyond the one fixed tiling schedule.
+- Tiling traffic is exact only under the specific modeled schedule used —
+  not optimal, not universal, not real-hardware traffic. Only three
+  explicit schedules are modeled (`c-resident`, `a-resident`,
+  `b-resident`); tile shape and schedule are always user-supplied, with
+  no automatic search. No PE-local memory, NoC, SRAM-to-PE traffic,
+  memory latency, or PE/tile coupling.
+- Schedule names describe the modeled loop order/residency literally, not
+  a verified claim of matching general "output/input/weight stationary"
+  hardware dataflow definitions.
 - Time estimates are analytical lower bounds under perfect compute/memory
   overlap, not measured latency. No queueing, contention, pipeline startup,
   or synchronization overhead is modeled.

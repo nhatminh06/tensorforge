@@ -1,4 +1,4 @@
-"""Capacity-constrained GEMM tiling under one fixed loop schedule.
+"""Capacity-constrained GEMM tiling under one of three explicit loop schedules.
 
 Tile dimensions split the GEMM into Tm x Tn x Tk blocks:
 
@@ -6,8 +6,14 @@ Tile dimensions split the GEMM into Tm x Tn x Tk blocks:
     n_tiles = ceil(N / Tn)
     k_tiles = ceil(K / Tk)
 
-Fixed schedule modeled (a "C-output-tile-resident" schedule — not a
-general accelerator dataflow, and not yet compared against alternatives):
+Three explicit residency schedules are modeled (GemmSchedule). Each keeps
+a different operand tile resident in SRAM across the innermost reuse loop;
+the other two tensors are loaded from DRAM. These are literal loop-order
+descriptions, not claims that they implement general "output stationary" /
+"input stationary" / "weight stationary" hardware dataflows. See
+docs/schedules.md for the full derivation and a comparison table.
+
+C_RESIDENT (the original Milestone-4 schedule):
 
     for mi in m_tiles:
         for ni in n_tiles:
@@ -18,43 +24,84 @@ general accelerator dataflow, and not yet compared against alternatives):
                 C_tile += A_tile @ B_tile
             store(C_tile)                       # to DRAM
 
-During one K-tile step, SRAM must simultaneously hold one A tile, one B
-tile, and the resident C tile:
+    A reads = a_bytes * n_tiles   (A reloaded once per ni; C, not A, is resident)
+    B reads = b_bytes * m_tiles   (B reloaded once per mi; C, not B, is resident)
+    C reads = 0                   (C accumulates fully resident, no partial spill)
+    C writes = c_bytes            (each output tile written once, when complete)
 
-    tile_working_set_bytes =
-        (Tm*Tk + Tk*Tn + Tm*Tn) * bytes_per_element
+A_RESIDENT:
 
-using the actual (possibly edge-clipped) tile dimensions of the largest
-tile, i.e. tile dimensions clipped to the workload: min(Tm, M), min(Tn,
-N), min(Tk, K). Edge tiles transfer only their useful elements — no
-padding is modeled or charged.
+    for mi in m_tiles:
+        for ki in k_tiles:
+            A_tile = load(A[mi, ki])            # resident in SRAM
+            for ni in n_tiles:
+                B_tile = load(B[ki, ni])        # from DRAM
+                C_tile = load(C[mi, ni]) or zero  # from DRAM, unless first K step
+                C_tile += A_tile @ B_tile
+                store(C_tile)                    # partial or final, to DRAM
 
-Traffic under this schedule:
-    - Each A[mi,ki] tile is reloaded once per ni (C, not A, stays
-      resident), so total A DRAM reads = a_bytes * n_tiles.
-    - Each B[ki,ni] tile is reloaded once per mi, so total B DRAM reads =
-      b_bytes * m_tiles.
-    - Each C[mi,ni] tile is written exactly once (it starts at zero and
-      accumulates across the K loop while resident) — there is no C read.
+B_RESIDENT (symmetric to A_RESIDENT):
 
-This holds exactly regardless of edge tiling, because summing the useful
-bytes of all A (or B) sub-tiles for a fixed reuse context always equals
-the full tensor's bytes.
+    for ni in n_tiles:
+        for ki in k_tiles:
+            B_tile = load(B[ki, ni])            # resident in SRAM
+            for mi in m_tiles:
+                A_tile = load(A[mi, ki])        # from DRAM
+                C_tile = load(C[mi, ni]) or zero  # from DRAM, unless first K step
+                C_tile += A_tile @ B_tile
+                store(C_tile)                    # partial or final, to DRAM
 
-Splitting K changes tile_steps and the tile working set, but — under this
-fixed schedule, with Tm/Tn unchanged — does NOT change total DRAM bytes,
-because K-tiling does not introduce any additional M/N reuse repetition.
+Because K is no longer the innermost loop in A_RESIDENT/B_RESIDENT, each
+output tile C[mi,ni] is visited once per K tile rather than staying
+resident across all of K — its partial sum must cross DRAM between
+visits. Per output tile: k_tiles writes (every visit, partial or final),
+and k_tiles - 1 reads (every visit after the first). Summed over all
+output tiles (which exactly partition C):
 
-This traffic model is exact only under the modeled schedule above. It is
+    C writes = c_bytes * k_tiles
+    C reads  = c_bytes * (k_tiles - 1)
+
+A_RESIDENT reads A once (a_bytes total, no repetition) but repeats B
+across m_tiles; B_RESIDENT reads B once but repeats A across n_tiles.
+Both trade input-tensor reuse for partial-sum DRAM traffic — which
+schedule wins depends on the workload's M/N/K shape.
+
+Capacity requirement (same for all three schedules — one A tile, one B
+tile, and one C tile must be simultaneously resident during a compute
+step):
+
+    tile_working_set_bytes = (Tm*Tk + Tk*Tn + Tm*Tn) * bytes_per_element
+
+using tile dimensions clipped to the workload: min(Tm, M), min(Tn, N),
+min(Tk, K). Edge tiles transfer only their useful elements — no padding
+is modeled or charged. These closed forms hold exactly regardless of edge
+tiling, because summing the useful bytes of all sub-tiles for a fixed
+reuse context always equals the full tensor's bytes.
+
+For C_RESIDENT, splitting K changes tile_steps and the tile working set
+but — with Tm/Tn fixed — does NOT change total DRAM bytes. For
+A_RESIDENT/B_RESIDENT, splitting K directly increases C partial-sum
+traffic (more k_tiles means more read/write round-trips per output tile).
+
+This traffic model is exact only under the modeled schedules above. It is
 NOT a claim about optimal, universal, or real-hardware GEMM traffic, and
-it does not model memory latency, SRAM->PE traffic, or alternative loop
-orders/dataflows.
+it does not model memory latency, SRAM->PE traffic, or an exhaustive set
+of loop orders/dataflows.
 """
 
 from dataclasses import dataclass
+from enum import Enum
 
 from tensorforge.gemm import Gemm
 from tensorforge.memory import MemoryHierarchy
+
+
+class GemmSchedule(Enum):
+    """Which operand tile stays resident in SRAM across the innermost reuse loop."""
+
+    C_RESIDENT = "c-resident"
+    A_RESIDENT = "a-resident"
+    B_RESIDENT = "b-resident"
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -83,6 +130,8 @@ class GemmTile:
 
 @dataclass(frozen=True)
 class TilingResult:
+    schedule: "GemmSchedule"
+
     m_tiles: int
     n_tiles: int
     k_tiles: int
@@ -94,6 +143,7 @@ class TilingResult:
 
     a_dram_read_bytes: int
     b_dram_read_bytes: int
+    c_dram_read_bytes: int
     c_dram_write_bytes: int
     total_dram_bytes: int
 
@@ -103,12 +153,18 @@ class TilingResult:
     effective_arithmetic_intensity: float
 
 
-def analyze_tiling(gemm: Gemm, tile: GemmTile, hierarchy: MemoryHierarchy) -> TilingResult:
-    """Analyze the fixed output-tile-resident schedule for one explicit tile shape.
+def analyze_tiling(
+    gemm: Gemm,
+    tile: GemmTile,
+    hierarchy: MemoryHierarchy,
+    schedule: GemmSchedule = GemmSchedule.C_RESIDENT,
+) -> TilingResult:
+    """Analyze one explicit tile shape under one explicit residency schedule.
 
-    Raises ValueError if the tile working set does not fit in the modeled
-    SRAM — an invalid tiling configuration is rejected outright, not
-    silently shrunk or proceeded with.
+    Defaults to C_RESIDENT (the original Milestone-4 schedule) so existing
+    callers are unaffected. Raises ValueError if the tile working set does
+    not fit in the modeled SRAM — an invalid tiling configuration is
+    rejected outright, not silently shrunk or proceeded with.
     """
     bytes_per_element = gemm.dtype.bytes_per_element
 
@@ -134,16 +190,34 @@ def analyze_tiling(gemm: Gemm, tile: GemmTile, hierarchy: MemoryHierarchy) -> Ti
             f"but SRAM capacity is {hierarchy.sram_bytes} B"
         )
 
-    a_dram_read_bytes = gemm.a_bytes * n_tiles
-    b_dram_read_bytes = gemm.b_bytes * m_tiles
-    c_dram_write_bytes = gemm.c_bytes
-    total_dram_bytes = a_dram_read_bytes + b_dram_read_bytes + c_dram_write_bytes
+    if schedule is GemmSchedule.C_RESIDENT:
+        a_dram_read_bytes = gemm.a_bytes * n_tiles
+        b_dram_read_bytes = gemm.b_bytes * m_tiles
+        c_dram_read_bytes = 0
+        c_dram_write_bytes = gemm.c_bytes
+    elif schedule is GemmSchedule.A_RESIDENT:
+        a_dram_read_bytes = gemm.a_bytes
+        b_dram_read_bytes = gemm.b_bytes * m_tiles
+        c_dram_read_bytes = gemm.c_bytes * (k_tiles - 1)
+        c_dram_write_bytes = gemm.c_bytes * k_tiles
+    elif schedule is GemmSchedule.B_RESIDENT:
+        a_dram_read_bytes = gemm.a_bytes * n_tiles
+        b_dram_read_bytes = gemm.b_bytes
+        c_dram_read_bytes = gemm.c_bytes * (k_tiles - 1)
+        c_dram_write_bytes = gemm.c_bytes * k_tiles
+    else:
+        raise ValueError(f"unknown schedule: {schedule!r}")
+
+    total_dram_bytes = (
+        a_dram_read_bytes + b_dram_read_bytes + c_dram_read_bytes + c_dram_write_bytes
+    )
 
     ideal_baseline_dram_bytes = gemm.dram_bytes
     traffic_amplification = total_dram_bytes / ideal_baseline_dram_bytes
     effective_arithmetic_intensity = gemm.flops / total_dram_bytes
 
     return TilingResult(
+        schedule=schedule,
         m_tiles=m_tiles,
         n_tiles=n_tiles,
         k_tiles=k_tiles,
@@ -153,9 +227,48 @@ def analyze_tiling(gemm: Gemm, tile: GemmTile, hierarchy: MemoryHierarchy) -> Ti
         tile_fits=tile_fits,
         a_dram_read_bytes=a_dram_read_bytes,
         b_dram_read_bytes=b_dram_read_bytes,
+        c_dram_read_bytes=c_dram_read_bytes,
         c_dram_write_bytes=c_dram_write_bytes,
         total_dram_bytes=total_dram_bytes,
         ideal_baseline_dram_bytes=ideal_baseline_dram_bytes,
         traffic_amplification=traffic_amplification,
         effective_arithmetic_intensity=effective_arithmetic_intensity,
+    )
+
+
+@dataclass(frozen=True)
+class ScheduleComparison:
+    c_resident: TilingResult
+    a_resident: TilingResult
+    b_resident: TilingResult
+    best_among_modeled_schedules: tuple[GemmSchedule, ...]
+
+
+def compare_schedules(
+    gemm: Gemm, tile: GemmTile, hierarchy: MemoryHierarchy
+) -> ScheduleComparison:
+    """Analyze the same GEMM/tile/SRAM under all three modeled schedules.
+
+    `best_among_modeled_schedules` lists every schedule tied for the
+    lowest total_dram_bytes among the three modeled here — it is not a
+    claim of global optimality, only the best among these three.
+    """
+    results = {
+        schedule: analyze_tiling(gemm, tile, hierarchy, schedule=schedule)
+        for schedule in (
+            GemmSchedule.C_RESIDENT,
+            GemmSchedule.A_RESIDENT,
+            GemmSchedule.B_RESIDENT,
+        )
+    }
+    min_traffic = min(result.total_dram_bytes for result in results.values())
+    best = tuple(
+        schedule for schedule, result in results.items() if result.total_dram_bytes == min_traffic
+    )
+
+    return ScheduleComparison(
+        c_resident=results[GemmSchedule.C_RESIDENT],
+        a_resident=results[GemmSchedule.A_RESIDENT],
+        b_resident=results[GemmSchedule.B_RESIDENT],
+        best_among_modeled_schedules=best,
     )

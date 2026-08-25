@@ -12,9 +12,14 @@ from tensorforge.hardware import HardwareConfig
 from tensorforge.memory import MemoryHierarchy, analyze_memory
 from tensorforge.pe_array import PeArray, map_gemm
 from tensorforge.roofline import compute_roofline
-from tensorforge.tiling import GemmTile, analyze_tiling
+from tensorforge.tiling import GemmSchedule, GemmTile, analyze_tiling, compare_schedules
 
 _DTYPE_CHOICES = {"fp32": DType.FP32, "fp16": DType.FP16, "int8": DType.INT8}
+_SCHEDULE_CHOICES = {
+    "c-resident": GemmSchedule.C_RESIDENT,
+    "a-resident": GemmSchedule.A_RESIDENT,
+    "b-resident": GemmSchedule.B_RESIDENT,
+}
 _KIB = 1024
 
 
@@ -59,6 +64,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tile-m", type=int, default=None)
     parser.add_argument("--tile-n", type=int, default=None)
     parser.add_argument("--tile-k", type=int, default=None)
+    parser.add_argument("--schedule", choices=sorted(_SCHEDULE_CHOICES), default=None)
+    parser.add_argument("--compare-schedules", action="store_true")
     return parser
 
 
@@ -75,6 +82,13 @@ def main(argv: list[str] | None = None) -> None:
             parser.error("--tile-m, --tile-n, and --tile-k must all be provided together")
         if args.sram_kib is None:
             parser.error("--tile-m/--tile-n/--tile-k require --sram-kib")
+
+    if args.schedule is not None or args.compare_schedules:
+        if any(t is None for t in tile_args) or args.sram_kib is None:
+            parser.error(
+                "--schedule/--compare-schedules require --tile-m, --tile-n, "
+                "--tile-k, and --sram-kib"
+            )
 
     gemm = Gemm(m=args.m, n=args.n, k=args.k, dtype=_DTYPE_CHOICES[args.dtype])
     hardware = HardwareConfig(
@@ -166,28 +180,62 @@ def main(argv: list[str] | None = None) -> None:
 
         if args.tile_m is not None:
             tile = GemmTile(tile_m=args.tile_m, tile_n=args.tile_n, tile_k=args.tile_k)
-            try:
-                tiling = analyze_tiling(gemm, tile, hierarchy)
-            except ValueError as exc:
-                parser.error(str(exc))
+            schedule = _SCHEDULE_CHOICES[args.schedule] if args.schedule else GemmSchedule.C_RESIDENT
 
-            print()
-            print("Tiling (fixed C-output-tile-resident schedule, exact under this schedule only)")
-            print(f"  tile shape              {tile.tile_m} x {tile.tile_n} x {tile.tile_k}")
-            print(f"  tile counts             {tiling.m_tiles} x {tiling.n_tiles} x {tiling.k_tiles}")
-            print(f"  tile steps              {tiling.tile_steps:,}")
-            print(f"  max tile working set    {_format_bytes(tiling.max_tile_working_set_bytes)}")
-            print(f"  tile fits SRAM          {'yes' if tiling.tile_fits else 'no'}")
-            print()
-            print("DRAM traffic (tiled)")
-            print(f"  A reads                 {_format_bytes(tiling.a_dram_read_bytes)}")
-            print(f"  B reads                 {_format_bytes(tiling.b_dram_read_bytes)}")
-            print(f"  C writes                {_format_bytes(tiling.c_dram_write_bytes)}")
-            print(f"  total                   {_format_bytes(tiling.total_dram_bytes)}")
-            print()
-            print(f"  ideal baseline          {_format_bytes(tiling.ideal_baseline_dram_bytes)}")
-            print(f"  amplification           {tiling.traffic_amplification:.2f}x")
-            print(f"  tiled arithmetic intensity {tiling.effective_arithmetic_intensity:.4f} FLOP/byte")
+            if args.compare_schedules:
+                try:
+                    comparison = compare_schedules(gemm, tile, hierarchy)
+                except ValueError as exc:
+                    parser.error(str(exc))
+
+                print()
+                print("Schedule comparison (exact under each modeled schedule only)")
+                print(f"  tile shape              {tile.tile_m} x {tile.tile_n} x {tile.tile_k}")
+                print()
+                header = f"  {'schedule':<12}{'A read':>12}{'B read':>12}{'C read':>12}{'C write':>12}{'total':>12}{'amp':>9}{'AI':>10}"
+                print(header)
+                for result in (comparison.c_resident, comparison.a_resident, comparison.b_resident):
+                    print(
+                        f"  {result.schedule.value:<12}"
+                        f"{_format_bytes(result.a_dram_read_bytes):>12}"
+                        f"{_format_bytes(result.b_dram_read_bytes):>12}"
+                        f"{_format_bytes(result.c_dram_read_bytes):>12}"
+                        f"{_format_bytes(result.c_dram_write_bytes):>12}"
+                        f"{_format_bytes(result.total_dram_bytes):>12}"
+                        f"{result.traffic_amplification:>8.2f}x"
+                        f"{result.effective_arithmetic_intensity:>9.3f}"
+                    )
+                print()
+                best = comparison.best_among_modeled_schedules
+                if len(best) == 1:
+                    print(f"Best among modeled schedules: {best[0].value}")
+                else:
+                    tied = ", ".join(s.value for s in best)
+                    print(f"Best among modeled schedules: tie ({tied})")
+            else:
+                try:
+                    tiling = analyze_tiling(gemm, tile, hierarchy, schedule=schedule)
+                except ValueError as exc:
+                    parser.error(str(exc))
+
+                print()
+                print(f"Tiling ({tiling.schedule.value} schedule, exact under this schedule only)")
+                print(f"  tile shape              {tile.tile_m} x {tile.tile_n} x {tile.tile_k}")
+                print(f"  tile counts             {tiling.m_tiles} x {tiling.n_tiles} x {tiling.k_tiles}")
+                print(f"  tile steps              {tiling.tile_steps:,}")
+                print(f"  max tile working set    {_format_bytes(tiling.max_tile_working_set_bytes)}")
+                print(f"  tile fits SRAM          {'yes' if tiling.tile_fits else 'no'}")
+                print()
+                print("DRAM traffic (tiled)")
+                print(f"  A reads                 {_format_bytes(tiling.a_dram_read_bytes)}")
+                print(f"  B reads                 {_format_bytes(tiling.b_dram_read_bytes)}")
+                print(f"  C reads                 {_format_bytes(tiling.c_dram_read_bytes)}")
+                print(f"  C writes                {_format_bytes(tiling.c_dram_write_bytes)}")
+                print(f"  total                   {_format_bytes(tiling.total_dram_bytes)}")
+                print()
+                print(f"  ideal baseline          {_format_bytes(tiling.ideal_baseline_dram_bytes)}")
+                print(f"  amplification           {tiling.traffic_amplification:.2f}x")
+                print(f"  tiled arithmetic intensity {tiling.effective_arithmetic_intensity:.4f} FLOP/byte")
 
 
 if __name__ == "__main__":
