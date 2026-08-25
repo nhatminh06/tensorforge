@@ -6,14 +6,16 @@ capacity. It starts from analytical models and adds architectural detail
 incrementally (PE arrays, memory hierarchy, tiling, dataflows, convolution,
 Transformer operations).
 
-## Current model (Milestone 3)
+## Current model (Milestone 4)
 
-Analytical GEMM + roofline + rectangular PE mapping + SRAM capacity
-analysis. Exact refetch traffic for SRAM-limited workloads is not modeled
-yet — that is the next milestone (tiling). There is no dataflow, no
-systolic timing, and no cycle accuracy. All numbers come from closed-form
-formulas over a `Gemm`, a `HardwareConfig`, an optional `PeArray`, and an
-optional `MemoryHierarchy`.
+Analytical GEMM + roofline + rectangular PE mapping + SRAM capacity +
+explicit GEMM tiling traffic. Tiled DRAM traffic is exact only for the
+one fixed output-tile-resident loop schedule currently modeled — not a
+claim of optimal, universal, or real-hardware GEMM traffic. There is no
+alternative dataflow comparison, no systolic timing, and no cycle
+accuracy. All numbers come from closed-form formulas over a `Gemm`, a
+`HardwareConfig`, an optional `PeArray`, an optional `MemoryHierarchy`,
+and an optional `GemmTile`.
 
 ## Equations
 
@@ -71,8 +73,28 @@ tiling_required = not full_working_set_fits
 Reports whether A, B, C individually and the full working set fit in a
 modeled SRAM capacity — a capacity fact, not a reuse guarantee. Baseline
 DRAM traffic (A+B read, C written) is unchanged regardless of fit; the
-exact extra traffic caused by an SRAM-limited working set requires tiling,
-which is not modeled yet. See [docs/memory.md](docs/memory.md).
+exact extra traffic caused by an SRAM-limited working set requires tiling.
+See [docs/memory.md](docs/memory.md).
+
+### GEMM tiling (optional, requires SRAM)
+
+```
+m_tiles = ceil(M/Tm), n_tiles = ceil(N/Tn), k_tiles = ceil(K/Tk)
+
+tile_working_set_bytes = (Tm*Tk + Tk*Tn + Tm*Tn) * bytes_per_element
+                          (rejected if it exceeds SRAM capacity)
+
+A reads = a_bytes * n_tiles      (C stays resident, not A)
+B reads = b_bytes * m_tiles      (C stays resident, not B)
+C writes = c_bytes                (written once, no C read)
+
+traffic_amplification = total_dram_bytes / ideal_baseline_dram_bytes
+effective_arithmetic_intensity = flops / total_dram_bytes
+```
+
+For one explicit user-supplied tile shape and a single fixed
+C-output-tile-resident loop schedule (no automatic tile search, no
+dataflow comparison yet). See [docs/tiling.md](docs/tiling.md).
 
 ## Build / run
 
@@ -108,20 +130,35 @@ python -m tensorforge --m 128 --n 128 --k 128 --dtype fp16 \
     --peak-tflops 1 --bandwidth-gbps 100 --sram-kib 128
 ```
 
+Add `--tile-m`/`--tile-n`/`--tile-k` (all three required together, and
+requiring `--sram-kib`) to also print exact tiled DRAM traffic under the
+fixed loop schedule:
+
+```bash
+python -m tensorforge --m 4 --n 4 --k 4 --dtype fp32 \
+    --peak-tflops 1 --bandwidth-gbps 100 --sram-kib 0.0625 \
+    --tile-m 2 --tile-n 2 --tile-k 2
+```
+
 ## Limitations
 
 - GEMM only; no convolution or Transformer operations yet.
 - DRAM traffic assumes each tensor is fetched/written exactly once — no
-  tiling, no reuse modeling. This baseline traffic does not change even
-  when the working set does not fit in the modeled SRAM.
+  reuse modeling. This baseline traffic does not change even when the
+  working set does not fit in the modeled SRAM (that's what tiling
+  traffic, below, is for).
 - PE-array model is a spatial-mapping + idealized compute-cycle model, not
   a systolic-array timing model: no fill/drain latency, operand
   propagation, memory access, NoC, or synchronization. No clock frequency,
   so results are cycles, not seconds.
 - SRAM model is capacity-only: fit/no-fit and headroom/deficit, not an
-  exact refetch-traffic estimate. No SRAM latency, bandwidth, or
-  SRAM-to-PE traffic modeling.
-- No dataflow modeling.
+  exact refetch-traffic estimate on its own.
+- Tiling traffic is exact only under the one fixed C-output-tile-resident
+  loop schedule currently modeled — not optimal, not universal, not
+  real-hardware traffic. Tile shape is always user-supplied; no automatic
+  search. No alternative dataflows yet. No SRAM-to-PE traffic, memory
+  latency, or PE/tile coupling.
+- No dataflow modeling beyond the one fixed tiling schedule.
 - Time estimates are analytical lower bounds under perfect compute/memory
   overlap, not measured latency. No queueing, contention, pipeline startup,
   or synchronization overhead is modeled.

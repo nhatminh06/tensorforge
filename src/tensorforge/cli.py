@@ -12,6 +12,7 @@ from tensorforge.hardware import HardwareConfig
 from tensorforge.memory import MemoryHierarchy, analyze_memory
 from tensorforge.pe_array import PeArray, map_gemm
 from tensorforge.roofline import compute_roofline
+from tensorforge.tiling import GemmTile, analyze_tiling
 
 _DTYPE_CHOICES = {"fp32": DType.FP32, "fp16": DType.FP16, "int8": DType.INT8}
 _KIB = 1024
@@ -55,6 +56,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Modeled global SRAM capacity in KiB (1 KiB = 1024 bytes).",
     )
+    parser.add_argument("--tile-m", type=int, default=None)
+    parser.add_argument("--tile-n", type=int, default=None)
+    parser.add_argument("--tile-k", type=int, default=None)
     return parser
 
 
@@ -64,6 +68,13 @@ def main(argv: list[str] | None = None) -> None:
 
     if (args.pe_rows is None) != (args.pe_cols is None):
         parser.error("--pe-rows and --pe-cols must be provided together")
+
+    tile_args = (args.tile_m, args.tile_n, args.tile_k)
+    if any(t is not None for t in tile_args):
+        if any(t is None for t in tile_args):
+            parser.error("--tile-m, --tile-n, and --tile-k must all be provided together")
+        if args.sram_kib is None:
+            parser.error("--tile-m/--tile-n/--tile-k require --sram-kib")
 
     gemm = Gemm(m=args.m, n=args.n, k=args.k, dtype=_DTYPE_CHOICES[args.dtype])
     hardware = HardwareConfig(
@@ -152,6 +163,31 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  reads                   {_format_bytes(mem.dram_read_bytes)}")
         print(f"  writes                  {_format_bytes(mem.dram_write_bytes)}")
         print(f"  total                   {_format_bytes(mem.total_dram_bytes)}")
+
+        if args.tile_m is not None:
+            tile = GemmTile(tile_m=args.tile_m, tile_n=args.tile_n, tile_k=args.tile_k)
+            try:
+                tiling = analyze_tiling(gemm, tile, hierarchy)
+            except ValueError as exc:
+                parser.error(str(exc))
+
+            print()
+            print("Tiling (fixed C-output-tile-resident schedule, exact under this schedule only)")
+            print(f"  tile shape              {tile.tile_m} x {tile.tile_n} x {tile.tile_k}")
+            print(f"  tile counts             {tiling.m_tiles} x {tiling.n_tiles} x {tiling.k_tiles}")
+            print(f"  tile steps              {tiling.tile_steps:,}")
+            print(f"  max tile working set    {_format_bytes(tiling.max_tile_working_set_bytes)}")
+            print(f"  tile fits SRAM          {'yes' if tiling.tile_fits else 'no'}")
+            print()
+            print("DRAM traffic (tiled)")
+            print(f"  A reads                 {_format_bytes(tiling.a_dram_read_bytes)}")
+            print(f"  B reads                 {_format_bytes(tiling.b_dram_read_bytes)}")
+            print(f"  C writes                {_format_bytes(tiling.c_dram_write_bytes)}")
+            print(f"  total                   {_format_bytes(tiling.total_dram_bytes)}")
+            print()
+            print(f"  ideal baseline          {_format_bytes(tiling.ideal_baseline_dram_bytes)}")
+            print(f"  amplification           {tiling.traffic_amplification:.2f}x")
+            print(f"  tiled arithmetic intensity {tiling.effective_arithmetic_intensity:.4f} FLOP/byte")
 
 
 if __name__ == "__main__":
