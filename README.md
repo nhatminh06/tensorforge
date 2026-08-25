@@ -6,11 +6,12 @@ capacity. It starts from analytical models and adds architectural detail
 incrementally (PE arrays, memory hierarchy, tiling, dataflows, convolution,
 Transformer operations).
 
-## Current model (Milestone 1)
+## Current model (Milestone 2)
 
-Analytical GEMM + roofline estimation. There is no PE-array simulation, no
-SRAM/tiling model, and no cycle accuracy. All numbers come from closed-form
-formulas over a `Gemm` and a `HardwareConfig`.
+Analytical GEMM + roofline + idealized rectangular PE-array mapping. There
+is no SRAM/tiling model, no dataflow, no systolic timing, and no cycle
+accuracy. All numbers come from closed-form formulas over a `Gemm`, a
+`HardwareConfig`, and (optionally) a `PeArray`.
 
 ## Equations
 
@@ -41,6 +42,22 @@ tolerance) -> balanced.
 
 See [docs/model.md](docs/model.md) for full detail and assumptions.
 
+### PE array (optional)
+
+```
+M -> PE rows, N -> PE columns
+row_waves    = ceil(M / rows)
+column_waves = ceil(N / columns)
+waves        = row_waves * column_waves
+
+spatial_utilization = (M * N) / (waves * rows * columns)
+
+compute_cycles = waves * K       (1 MAC/PE/cycle)
+```
+
+An idealized spatial mapping of GEMM output onto a finite PE array — not a
+systolic-array timing model. See [docs/pe-array.md](docs/pe-array.md).
+
 ## Build / run
 
 ```bash
@@ -59,12 +76,23 @@ Prints GEMM dimensions, MAC/FLOP counts, tensor byte sizes, modeled DRAM
 traffic, arithmetic intensity, roofline ceilings, estimated time, and the
 compute-bound/memory-bound classification.
 
+Add `--pe-rows`/`--pe-cols` (both required together) to also print the
+PE-array mapping section:
+
+```bash
+python -m tensorforge --m 128 --n 128 --k 128 --dtype fp16 \
+    --peak-tflops 1 --bandwidth-gbps 100 --pe-rows 16 --pe-cols 16
+```
+
 ## Limitations
 
 - GEMM only; no convolution or Transformer operations yet.
 - DRAM traffic assumes each tensor is fetched/written exactly once — no
   tiling, no SRAM capacity, no reuse modeling.
-- No PE-array or utilization model.
+- PE-array model is a spatial-mapping + idealized compute-cycle model, not
+  a systolic-array timing model: no fill/drain latency, operand
+  propagation, memory access, NoC, or synchronization. No clock frequency,
+  so results are cycles, not seconds.
 - No dataflow modeling.
 - Time estimates are analytical lower bounds under perfect compute/memory
   overlap, not measured latency. No queueing, contention, pipeline startup,
