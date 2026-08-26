@@ -1,7 +1,7 @@
 [project]
 name = "tensorforge"
 version = "0.1.0"
-description = "Educational AI-accelerator architecture simulator"
+description = "Analytical AI-accelerator performance modeling toolkit for GEMM, Transformer, and Conv2D workloads"
 requires-python = ">=3.12"
 
 [build-system]

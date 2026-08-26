@@ -1,363 +1,198 @@
 # TensorForge
 
-TensorForge is an educational simulator for studying how neural-network
-workloads interact with accelerator compute, memory bandwidth, and memory
-capacity. It starts from analytical models and adds architectural detail
-incrementally (PE arrays, memory hierarchy, tiling, dataflows, convolution,
-Transformer operations).
+An analytical AI-accelerator performance modeling toolkit for studying how
+GEMM, Transformer, and Conv2D workloads interact with PE geometry, SRAM
+capacity, tiling, data residency, and DRAM bandwidth.
 
-## Current model (Milestone 9)
+## Why TensorForge
 
-Analytical GEMM + roofline + rectangular PE mapping + SRAM capacity +
-explicit GEMM tiling traffic under three explicit loop-order/residency
-schedules (`c-resident`, `a-resident`, `b-resident`) + analytical
-compute/memory execution timing + a bounded, deterministic design-space
-explorer over user-supplied tile/schedule/PE-array candidates + GEMM-only
-Transformer-block workload modeling + Conv2D/CNN workload modeling
-lowered through an explicit **materialized-im2col** GEMM model. Both
-Transformer and Conv2D workloads reuse the same PE/SRAM/tiling/schedule/
-timing/exploration machinery — they only derive `Gemm` shapes and let
-each operation/layer pick its own mapping on one shared, fixed PE array.
-TensorForge models GEMM, GEMM-heavy Transformer blocks, and Conv2D
-workloads — it does **not** simulate Transformer inference or CNN
-inference: softmax, normalization, activation, pooling, and residual
-operations are explicitly unmodeled, there is no head parallelism,
-fusion, KV cache, decoding loop, or cross-layer SRAM residency, and
-convolution traffic is materialized-im2col traffic, not direct-
-convolution traffic. TensorForge is a design-space explorer, not an
-architecture optimizer, and not a complete CNN/Transformer simulator.
-There is no continuous/automatic architecture search, no systolic timing,
-and no cycle accuracy. All numbers come from closed-form formulas over a
-`Gemm`, a `HardwareConfig`, an optional `PeArray`, an optional
-`MemoryHierarchy`, an optional `GemmTile` + `GemmSchedule`, an optional
-`TimingConfig`, an optional bounded `explore()` search, an optional
-`TransformerBlockSpec`, and an optional `Conv2DSpec`/`CnnWorkload`
-composing all of the above.
+Understanding accelerator performance requires reasoning across several
+layers at once: how much arithmetic a workload needs, how it maps onto a
+finite PE array, whether its working set fits in SRAM, how tiling and
+loop order change data movement, and whether the result is bound by
+compute or by memory bandwidth. TensorForge makes every one of those
+steps explicit and traceable to a formula, rather than hiding them behind
+a single opaque "runtime" number.
 
-## Equations
+## What it models
 
-```
-C[M,N] = A[M,K] x B[K,N]
+- **GEMM**: MAC/FLOP counts, tensor byte footprints, an ideal roofline
+  model, rectangular PE-array mapping with spatial utilization, SRAM
+  capacity checks, explicit M/N/K tiling under three residency schedules
+  (`c-resident`/`a-resident`/`b-resident`) with exact DRAM traffic, and
+  analytical compute/memory timing.
+- **Transformer**: a GEMM-heavy block (Q/K/V/output projections,
+  attention scores/value, MLP up/down) decomposed from `batch`,
+  `sequence_length`, `d_model`, `num_heads`, `d_ff`, with per-operation
+  tile/schedule mapping on one shared, fixed PE array.
+- **Conv2D / CNN**: convolution lowered through an explicit
+  **materialized-im2col** GEMM mapping, plus a chained Conv-only CNN
+  workload representation.
+- **Bounded design-space exploration**: a deterministic search over
+  user-supplied tile/schedule/PE-array candidates, ranked by modeled
+  execution time.
+- **Reproducible presets and experiments**: named workload and
+  accelerator configurations that produce deterministic, machine-readable
+  JSON results.
 
-MACs  = M * N * K
-FLOPs = 2 * MACs                (1 MAC = 2 FLOPs)
+TensorForge is a design-space explorer and analytical modeling toolkit,
+not a cycle-accurate simulator, not an architecture optimizer, and not a
+complete Transformer/CNN inference simulator (see [Limitations](#limitations)).
 
-DRAM bytes = bytes(A) + bytes(B) + bytes(C)
-             (A read once, B read once, C written once — idealized)
-
-arithmetic_intensity = FLOPs / DRAM bytes            [FLOP/byte]
-
-ridge_point    = peak_compute / memory_bandwidth      [FLOP/byte]
-memory_ceiling = arithmetic_intensity * memory_bandwidth   [FLOP/s]
-compute_ceiling = peak_compute                              [FLOP/s]
-attainable_performance = min(compute_ceiling, memory_ceiling)
-
-compute_time   = FLOPs / peak_compute        [s]
-memory_time    = DRAM bytes / memory_bandwidth  [s]
-estimated_time = max(compute_time, memory_time)  (perfect-overlap assumption)
-```
-
-Classification: `memory_ceiling < compute_ceiling` -> memory-bound,
-`memory_ceiling > compute_ceiling` -> compute-bound, equal (within
-tolerance) -> balanced.
-
-See [docs/model.md](docs/model.md) for full detail and assumptions.
-
-### PE array (optional)
+## Architecture
 
 ```
-M -> PE rows, N -> PE columns
-row_waves    = ceil(M / rows)
-column_waves = ceil(N / columns)
-waves        = row_waves * column_waves
-
-spatial_utilization = (M * N) / (waves * rows * columns)
-
-compute_cycles = waves * K       (1 MAC/PE/cycle)
+Workload (GEMM / Transformer / Conv2D / CNN)
+        |
+Gemm normalization  ->  PE mapping  ->  SRAM feasibility
+        |                                     |
+        +-------------- Tiling + schedule ----+
+                            |
+                          Timing
+                            |
+                  Bounded exploration
+                            |
+              Presets + deterministic experiments
 ```
 
-An idealized spatial mapping of GEMM output onto a finite PE array — not a
-systolic-array timing model. See [docs/pe-array.md](docs/pe-array.md).
-
-### SRAM capacity (optional)
-
-```
-working_set_bytes = a_bytes + b_bytes + c_bytes
-full_working_set_fits = working_set_bytes <= sram_bytes
-tiling_required = not full_working_set_fits
-```
-
-Reports whether A, B, C individually and the full working set fit in a
-modeled SRAM capacity — a capacity fact, not a reuse guarantee. Baseline
-DRAM traffic (A+B read, C written) is unchanged regardless of fit; the
-exact extra traffic caused by an SRAM-limited working set requires tiling.
-See [docs/memory.md](docs/memory.md).
-
-### GEMM tiling (optional, requires SRAM)
-
-```
-m_tiles = ceil(M/Tm), n_tiles = ceil(N/Tn), k_tiles = ceil(K/Tk)
-
-tile_working_set_bytes = (Tm*Tk + Tk*Tn + Tm*Tn) * bytes_per_element
-                          (rejected if it exceeds SRAM capacity)
-
-A reads = a_bytes * n_tiles      (C stays resident, not A)
-B reads = b_bytes * m_tiles      (C stays resident, not B)
-C writes = c_bytes                (written once, no C read)
-
-traffic_amplification = total_dram_bytes / ideal_baseline_dram_bytes
-effective_arithmetic_intensity = flops / total_dram_bytes
-```
-
-For one explicit user-supplied tile shape. See [docs/tiling.md](docs/tiling.md).
-
-### Schedule comparison (optional, requires tiling)
-
-```
-c-resident: A reads = a_bytes*n_tiles, B reads = b_bytes*m_tiles, C reads = 0
-a-resident: A reads = a_bytes,         B reads = b_bytes*m_tiles, C reads = c_bytes*(k_tiles-1)
-b-resident: A reads = a_bytes*n_tiles, B reads = b_bytes,         C reads = c_bytes*(k_tiles-1)
-```
-
-Three explicit loop-order/residency schedules over the *same* GEMM, tile,
-and SRAM — only loop order changes. `compare_schedules` reports every
-schedule tied for lowest traffic among these three (`best_among_modeled_schedules`,
-not a claim of global optimality). No automatic tile or schedule search.
-See [docs/schedules.md](docs/schedules.md).
-
-### Execution timing (optional, requires PE array + tiling)
-
-```
-compute_time = compute_cycles / clock_hz
-memory_time  = total_dram_bytes / memory_bandwidth_bytes_per_second   (schedule-specific)
-
-serialized_time      = compute_time + memory_time        (no overlap)
-perfect_overlap_time = max(compute_time, memory_time)     (full overlap)
-```
-
-Combines the existing PE-mapping compute cycles and schedule-specific
-tiled DRAM traffic into two analytical time bounds and a
-compute-bound/memory-bound/balanced classification. `PeArray` gains no
-new fields — clock frequency is a separate `TimingConfig`. See
-[docs/timing.md](docs/timing.md).
-
-### Bounded configuration exploration (optional, requires SRAM + clock)
-
-```
-candidate_count = len(tile_m) * len(tile_n) * len(tile_k)
-                   * len(pe_rows) * len(pe_cols) * len(schedules)
-                   (rejected outright if it exceeds 100,000)
-
-rank by: perfect_overlap_time_seconds ascending
-  tie-break: serialized_time, total_dram_bytes, compute_cycles,
-             PE count, then candidate fields lexicographically
-```
-
-Searches a finite, user-supplied Cartesian product of tile shapes,
-residency schedules, and PE-array shapes (GEMM, dtype, SRAM, clock, and
-bandwidth stay fixed), driving the existing tiling/PE/timing models —
-no new performance formulas. Infeasible tiles (exceed SRAM) are excluded
-but do not stop the search. Reports the "best among searched candidates"
-— never a claim of global or real-hardware optimality. See
-[docs/exploration.md](docs/exploration.md).
-
-### Transformer GEMM block (optional, requires SRAM + clock)
-
-```
-q/k/v/output projection: M=B*S, N=D, K=D, repetitions=1
-attention scores:        M=S,   N=S,   K=head_dim, repetitions=B*H
-attention value:         M=S,   N=head_dim, K=S,   repetitions=B*H
-mlp up/down:              M=B*S, N=F or D, K=D or F, repetitions=1
-
-modeled GEMM FLOPs = 8*B*S*D^2 + 4*B*S*D*F + 4*B*S^2*D
-```
-
-Decomposes a Transformer block's GEMM-heavy portion into 8 operation
-groups (given `B, S, D, H, F`) and evaluates all of them on one shared,
-fixed PE array, letting each operation choose its own best tile/schedule
-mapping via the existing explorer. Attention's B*H repetitions execute
-sequentially (no head parallelism). This is a **GEMM-only** estimate:
-softmax, normalization, activation, and residual additions are excluded,
-not free. PE-array shapes can also be compared across the whole block.
-See [docs/transformer.md](docs/transformer.md).
-
-### Conv2D / CNN (materialized-im2col lowering, optional, requires SRAM + clock)
-
-```
-GEMM M = batch_size * output_height * output_width
-GEMM N = out_channels
-GEMM K = in_channels * kernel_height * kernel_width
-
-im2col_bytes = M * K * bytes_per_element   (== Gemm A bytes)
-im2col_expansion_ratio = im2col_bytes / logical_input_bytes
-```
-
-Lowers Conv2D to a GEMM via **materialized im2col** — the full
-activation-patch matrix, including every duplicated overlapping pixel —
-then evaluates it through the same PE/tiling/schedule/timing model as any
-other GEMM. This is explicitly *not* direct-convolution traffic: a real
-direct-convolution dataflow would generally move far less data. A
-`CnnWorkload` chains an ordered sequence of Conv2D layers (each layer's
-input shape derived from the previous layer's output) and aggregates
-their timing/traffic on one shared, fixed PE array, sequentially, with no
-cross-layer SRAM residency. See [docs/convolution.md](docs/convolution.md).
-
-## Build / run
-
-```bash
-pip install -e .
-pytest -q
-```
+See [docs/architecture.md](docs/architecture.md) for the full module map.
 
 ## Example
 
 ```bash
 python -m tensorforge --m 1024 --n 1024 --k 1024 --dtype fp16 \
-    --peak-tflops 10 --bandwidth-gbps 200
+    --peak-tflops 10 --bandwidth-gbps 200 --pe-rows 32 --pe-cols 32
 ```
 
-Prints GEMM dimensions, MAC/FLOP counts, tensor byte sizes, modeled DRAM
-traffic, arithmetic intensity, roofline ceilings, estimated time, and the
-compute-bound/memory-bound classification.
+prints GEMM operation counts, tensor byte sizes, roofline ceilings,
+PE-array mapping and utilization, and a compute-bound/memory-bound
+classification.
 
-Add `--pe-rows`/`--pe-cols` (both required together) to also print the
-PE-array mapping section:
+## Workloads
+
+- **GEMM** — `python -m tensorforge --m M --n N --k K ...`
+- **Transformer** — `python -m tensorforge --transformer-block --batch-size ... --seq-len ... --d-model ... --num-heads ... --d-ff ...`
+- **Conv2D** — `python -m tensorforge --conv2d --batch-size ... --in-channels ... --input-height ... --input-width ... --out-channels ... --kernel-h ... --kernel-w ...`
+
+Each mode accepts `--dtype`, `--peak-tflops`, `--bandwidth-gbps`, and
+optionally `--sram-kib`, `--pe-rows`/`--pe-cols`, tile candidate lists,
+and `--schedule-values`. See `python -m tensorforge --help`.
+
+## Accelerator model
+
+One global SRAM, one rectangular PE array (`1 PE = 1 MAC/cycle`, `1 MAC =
+2 FLOPs`), one DRAM bandwidth figure, one PE clock. Compute time is
+`compute_cycles / clock_hz`; memory time is `modeled_dram_bytes /
+bandwidth`; both a no-overlap (`serialized`) and full-overlap
+(`perfect_overlap`) bound are reported. See
+[docs/timing.md](docs/timing.md).
+
+## Mapping model
+
+A GEMM is split into `Tm x Tn x Tk` tiles that must fit the modeled SRAM.
+Three explicit, fully-specified loop schedules (`c-resident`,
+`a-resident`, `b-resident`) each produce a different, exactly-derived
+DRAM traffic total from the same arithmetic work. See
+[docs/tiling.md](docs/tiling.md) and [docs/schedules.md](docs/schedules.md).
+
+## Design-space exploration
+
+`explore()` evaluates the full Cartesian product of user-supplied tile,
+schedule, and PE-array candidates (bounded, with a hard size limit),
+ranks them deterministically by modeled execution time, and reports the
+**best among searched candidates** — never a claim of global optimality.
+See [docs/exploration.md](docs/exploration.md).
+
+## Reproducible experiments
 
 ```bash
-python -m tensorforge --m 128 --n 128 --k 128 --dtype fp16 \
-    --peak-tflops 1 --bandwidth-gbps 100 --pe-rows 16 --pe-cols 16
+python -m tensorforge --list-presets
+
+python -m tensorforge --workload-preset gemm_tiny --accelerator-preset balanced \
+    --tile-m-values 32,64,128 --tile-n-values 32,64,128 --tile-k-values 32,64,128
+
+python -m tensorforge --workload-preset transformer_medium --accelerator-preset compute_heavy \
+    --tile-m-values 32,64 --tile-n-values 32,64 --tile-k-values 32,64 \
+    --output-json result.json
 ```
 
-Add `--sram-kib` (independently of `--pe-rows`/`--pe-cols`) to also print
-the SRAM capacity section:
+Presets are generic, reproducible configurations (`gemm_tiny`,
+`transformer_medium`, `conv_spatial`, `cnn_like_small`, `small`,
+`balanced`, `compute_heavy`, `bandwidth_heavy`, ...) — not claims about
+any real model or chip. `--output-json` writes a deterministic result
+(`schema_version: 1`, sorted keys, no timestamps): the same experiment
+run twice produces byte-identical JSON.
 
-```bash
-python -m tensorforge --m 128 --n 128 --k 128 --dtype fp16 \
-    --peak-tflops 1 --bandwidth-gbps 100 --sram-kib 128
-```
+## Validation
 
-Add `--tile-m`/`--tile-n`/`--tile-k` (all three required together, and
-requiring `--sram-kib`) to also print exact tiled DRAM traffic under the
-fixed loop schedule:
+All validation is analytical: independently hand-derived known-value
+checks, closed-form invariant cross-checks, and scaling-law tests — no
+silicon validation. 223 tests currently pass (`pytest -q`). See
+[docs/validation.md](docs/validation.md) and
+[docs/experiments.md](docs/experiments.md) for the full studies,
+including a 4-accelerator x 4-workload tradeoff study, compute/memory
+crossover demonstrations, and SRAM/bandwidth/PE/sequence-length/kernel-size
+sensitivity sweeps.
 
-```bash
-python -m tensorforge --m 4 --n 4 --k 4 --dtype fp32 \
-    --peak-tflops 1 --bandwidth-gbps 100 --sram-kib 0.0625 \
-    --tile-m 2 --tile-n 2 --tile-k 2
-```
+## What TensorForge demonstrates
 
-Add `--schedule {c-resident,a-resident,b-resident}` (defaults to
-`c-resident`, matching Milestone-4 behavior) to pick a residency schedule,
-or `--compare-schedules` to print all three side by side:
-
-```bash
-python -m tensorforge --m 4 --n 4 --k 4 --dtype fp32 \
-    --peak-tflops 1 --bandwidth-gbps 100 --sram-kib 0.0625 \
-    --tile-m 2 --tile-n 2 --tile-k 2 --compare-schedules
-```
-
-Add `--clock-ghz` (requires `--pe-rows`/`--pe-cols`, `--tile-m`/`--tile-n`/`--tile-k`,
-and `--sram-kib`; not combinable with `--compare-schedules`) to print
-analytical compute/memory execution timing:
-
-```bash
-python -m tensorforge --m 4 --n 4 --k 4 --dtype fp32 \
-    --peak-tflops 1 --bandwidth-gbps 100 --pe-rows 2 --pe-cols 2 \
-    --sram-kib 0.0625 --tile-m 2 --tile-n 2 --tile-k 2 --clock-ghz 1
-```
-
-Use `--explore` (with `--sram-kib` and `--clock-ghz`, and candidate lists
-instead of single-run `--tile-m`/`--pe-rows`/`--schedule`) to search and
-rank a bounded configuration space:
-
-```bash
-python -m tensorforge --m 256 --n 256 --k 256 --dtype fp16 \
-    --peak-tflops 100 --bandwidth-gbps 100 --sram-kib 32 --clock-ghz 1 \
-    --explore \
-    --tile-m-values 16,32,64 --tile-n-values 16,32,64 --tile-k-values 16,32 \
-    --pe-row-values 8,16,32 --pe-col-values 8,16,32 --top-k 5
-```
-
-Use `--transformer-block` (with `--batch-size`/`--seq-len`/`--d-model`/
-`--num-heads`/`--d-ff`, `--sram-kib`, `--clock-ghz`, tile candidate lists,
-and either `--pe-rows`/`--pe-cols` for one fixed architecture or
-`--explore-pe` with `--pe-row-values`/`--pe-col-values` to compare PE
-architectures) to model a Transformer-like GEMM block:
-
-```bash
-python -m tensorforge --transformer-block \
-    --batch-size 1 --seq-len 128 --d-model 768 --num-heads 12 --d-ff 3072 \
-    --dtype fp16 --peak-tflops 100 --bandwidth-gbps 100 --sram-kib 512 \
-    --clock-ghz 1 --pe-rows 32 --pe-cols 32 \
-    --tile-m-values 16,32,64 --tile-n-values 16,32,64 --tile-k-values 16,32,64
-```
-
-Use `--conv2d` (with `--batch-size`, `--in-channels`/`--input-height`/
-`--input-width`, `--out-channels`, `--kernel-h`/`--kernel-w`, optional
-`--stride-h`/`--stride-w`/`--padding-h`/`--padding-w`, `--sram-kib`,
-`--clock-ghz`, tile candidate lists, and either `--pe-rows`/`--pe-cols`
-or `--explore-pe`) to model one Conv2D layer's materialized-im2col GEMM:
-
-```bash
-python -m tensorforge --conv2d \
-    --batch-size 1 --in-channels 64 --input-height 56 --input-width 56 \
-    --out-channels 128 --kernel-h 3 --kernel-w 3 --padding-h 1 --padding-w 1 \
-    --dtype fp16 --peak-tflops 100 --bandwidth-gbps 100 --sram-kib 512 \
-    --clock-ghz 1 --pe-rows 32 --pe-cols 32 \
-    --tile-m-values 16,32,64 --tile-n-values 16,32,64 --tile-k-values 16,32,64
-```
+Roofline reasoning; PE-array spatial utilization and its sensitivity to
+array shape (not just PE count); SRAM capacity as a hard constraint on
+feasible tiling; how loop order/residency changes DRAM traffic for
+identical arithmetic; compute-bound vs. memory-bound classification and
+the crossover between them; bounded, deterministic architecture search;
+Transformer workload decomposition and quadratic-vs-linear scaling;
+convolution-to-GEMM lowering and its memory-footprint tradeoffs;
+reproducible, machine-readable performance experiments.
 
 ## Limitations
 
-- GEMM only; no convolution or Transformer operations yet.
-- DRAM traffic assumes each tensor is fetched/written exactly once — no
-  reuse modeling. This baseline traffic does not change even when the
-  working set does not fit in the modeled SRAM (that's what tiling
-  traffic, below, is for).
-- PE-array model is a spatial-mapping + idealized compute-cycle model, not
-  a systolic-array timing model: no fill/drain latency, operand
-  propagation, memory access, NoC, or synchronization. No clock frequency,
-  so results are cycles, not seconds.
-- SRAM model is capacity-only: fit/no-fit and headroom/deficit, not an
-  exact refetch-traffic estimate on its own.
-- Tiling traffic is exact only under the specific modeled schedule used —
-  not optimal, not universal, not real-hardware traffic. Only three
-  explicit schedules are modeled (`c-resident`, `a-resident`,
-  `b-resident`); tile shape and schedule are always user-supplied, with
-  no automatic search. No PE-local memory, NoC, SRAM-to-PE traffic,
-  memory latency, or PE/tile coupling.
-- Schedule names describe the modeled loop order/residency literally, not
-  a verified claim of matching general "output/input/weight stationary"
-  hardware dataflow definitions.
-- Roofline time estimates (Milestone 1) are analytical lower bounds under
-  perfect compute/memory overlap, not measured latency.
-- Execution timing (Milestone 6) combines actual modeled PE cycles and
-  schedule-specific tiled traffic into two bounds — serialized (no
-  overlap) and perfect-overlap — not a partial-overlap or scheduling
-  model. Bandwidth-only DRAM timing: no DRAM latency, bank conflicts,
-  burst inefficiency, or controller overhead. No SRAM timing, no PE
-  pipeline fill/drain, no NoC, no power/energy.
-- Exploration (Milestone 7) is a bounded discrete search over
-  user-supplied candidate sets only — no automatic candidate generation,
-  no continuous optimization, no clock/bandwidth/SRAM sweep. A result is
-  only the "best among searched candidates," never a global or
-  real-hardware optimum.
-- Transformer block modeling (Milestone 8) is GEMM-only: softmax,
-  normalization, activation, and residual additions are unmodeled
-  (excluded, not free). Attention heads execute sequentially (no head
-  parallelism); no QKV/attention fusion, no cross-operation SRAM
-  residency, no KV cache, no decoding loop, no power/energy model.
-- Conv2D/CNN modeling (Milestone 9) uses one explicit materialized-im2col
-  lowering — not direct/implicit convolution, not Winograd, not FFT
-  convolution. No depthwise, grouped, dilated, or transposed convolution.
-  No activation/normalization/pooling/residual timing. No cross-layer
-  SRAM residency in `CnnWorkload`. Materialized-im2col DRAM traffic can
-  substantially exceed the logical input tensor's size for kernels larger
-  than 1x1 — this is the modeled quantity, not real CNN accelerator
-  traffic.
-- Not validated against real hardware; not cycle-accurate.
+Every layer's limitations are documented in full in
+[docs/limitations.md](docs/limitations.md). In short: analytical only
+(not cycle-accurate); one global SRAM with no latency model;
+bandwidth-only DRAM timing; three fixed residency schedules over
+user-supplied, bounded candidates; Transformer/CNN modeling is GEMM-only
+(no softmax/normalization/activation/pooling/residual, no head
+parallelism, no fusion, no cross-operation SRAM residency); convolution
+uses one materialized-im2col lowering (no direct convolution, no
+grouped/depthwise/dilated convolution); no power/energy or area model;
+no real-hardware validation.
 
-## Roadmap
+## Repository structure
 
-PE array -> memory hierarchy -> tiling -> dataflows -> convolution ->
-Transformer operations -> architecture sweeps -> validation.
+```
+src/tensorforge/
+  gemm.py roofline.py pe_array.py memory.py     core analytical models
+  tiling.py timing.py explore.py                mapping, timing, search
+  transformer.py convolution.py                 workload decomposition
+  presets.py experiments.py                     reproducible experiments
+  cli.py                                         command-line interface
+tests/            one test file per module, 223 tests total
+docs/             per-topic model docs + architecture/design/validation/
+                  limitations/experiments
+scripts/          demo.sh, validate.sh
+```
+
+## Quick start
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+pytest -q
+
+python -m tensorforge --list-presets
+python -m tensorforge --workload-preset gemm_tiny --accelerator-preset balanced \
+    --tile-m-values 32,64,128 --tile-n-values 32,64,128 --tile-k-values 32,64,128
+
+bash scripts/demo.sh
+```
+
+## Next phase
+
+TensorForge Core is now frozen as a standalone modeling engine.
+`experiments.py` already produces deterministic JSON designed to be
+consumed by an external tracking layer without TensorForge Core ever
+depending on it. A future ML Systems / MLOps phase (experiment tracking,
+CI performance regression, benchmark validation) would build on top of
+this interface, not inside it.
