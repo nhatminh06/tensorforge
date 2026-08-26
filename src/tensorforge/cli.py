@@ -20,6 +20,11 @@ from tensorforge.transformer import (
     evaluate_transformer_block,
     explore_transformer_architectures,
 )
+from tensorforge.convolution import (
+    Conv2DSpec,
+    evaluate_conv2d,
+    explore_conv2d_architectures,
+)
 
 _DTYPE_CHOICES = {"fp32": DType.FP32, "fp16": DType.FP16, "int8": DType.INT8}
 _OP_DISPLAY_NAMES = {
@@ -129,6 +134,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-heads", type=int, default=None)
     parser.add_argument("--d-ff", type=int, default=None)
     parser.add_argument("--explore-pe", action="store_true")
+    parser.add_argument("--conv2d", action="store_true")
+    parser.add_argument("--in-channels", type=int, default=None)
+    parser.add_argument("--input-height", type=int, default=None)
+    parser.add_argument("--input-width", type=int, default=None)
+    parser.add_argument("--out-channels", type=int, default=None)
+    parser.add_argument("--kernel-h", type=int, default=None)
+    parser.add_argument("--kernel-w", type=int, default=None)
+    parser.add_argument("--stride-h", type=int, default=1)
+    parser.add_argument("--stride-w", type=int, default=1)
+    parser.add_argument("--padding-h", type=int, default=0)
+    parser.add_argument("--padding-w", type=int, default=0)
     return parser
 
 
@@ -420,6 +436,145 @@ def _run_transformer_block(parser: argparse.ArgumentParser, args, hardware: Hard
         _print_block_totals(block_result)
 
 
+def _print_conv2d_result(spec: Conv2DSpec, args, pe_array, evaluation) -> None:
+    lowering = evaluation.lowering
+    c, t = evaluation.mapping.candidate, evaluation.mapping.timing_result
+
+    print("Conv2D (materialized-im2col GEMM lowering, not direct-convolution timing)")
+    print()
+    print("Input")
+    print(f"  batch                    {spec.batch_size}")
+    print(f"  channels                 {spec.in_channels}")
+    print(f"  size                     {spec.input_height} x {spec.input_width}")
+    print()
+    print("Kernel")
+    print(f"  out channels             {spec.out_channels}")
+    print(f"  kernel                   {spec.kernel_height} x {spec.kernel_width}")
+    print(f"  stride                   {spec.stride_height} x {spec.stride_width}")
+    print(f"  padding                  {spec.padding_height} x {spec.padding_width}")
+    print()
+    print("Output")
+    print(
+        f"  shape                    {spec.batch_size} x {spec.out_channels} x "
+        f"{lowering.output_height} x {lowering.output_width}"
+    )
+    print()
+    print("Compute")
+    print(f"  MACs                     {spec.macs:,}")
+    print(f"  FLOPs                    {spec.flops:,}")
+    print()
+    print("Materialized im2col")
+    print(f"  GEMM M x N x K           {lowering.gemm.m} x {lowering.gemm.n} x {lowering.gemm.k}")
+    print(f"  logical input            {_format_bytes(lowering.input_bytes)}")
+    print(f"  im2col activation        {_format_bytes(lowering.im2col_bytes)}")
+    print(f"  expansion                {lowering.im2col_expansion_ratio:.2f}x")
+    print()
+    print("Mapping")
+    print(f"  PE array                 {pe_array.rows} x {pe_array.columns}")
+    print(f"  tile                     {c.tile_m} x {c.tile_n} x {c.tile_k}")
+    print(f"  schedule                 {c.schedule.value}")
+    print()
+    print("Timing (materialized-im2col GEMM model)")
+    print(f"  DRAM traffic             {_format_bytes(t.dram_bytes)}")
+    print(f"  compute time             {_format_seconds(t.compute_time_seconds)}")
+    print(f"  memory time              {_format_seconds(t.memory_time_seconds)}")
+    print(f"  perfect-overlap          {_format_seconds(t.perfect_overlap_time_seconds)}")
+    print(f"  serialized               {_format_seconds(t.serialized_time_seconds)}")
+    print(f"  bottleneck               {t.bottleneck}")
+
+
+def _run_conv2d(parser: argparse.ArgumentParser, args, hardware: HardwareConfig) -> None:
+    tile_m_values = _parse_int_list(parser, "--tile-m-values", args.tile_m_values)
+    tile_n_values = _parse_int_list(parser, "--tile-n-values", args.tile_n_values)
+    tile_k_values = _parse_int_list(parser, "--tile-k-values", args.tile_k_values)
+
+    schedules = None
+    if args.schedule_values is not None:
+        schedules = []
+        for name in args.schedule_values.split(","):
+            name = name.strip()
+            if name not in _SCHEDULE_CHOICES:
+                parser.error(f"--schedule-values: unknown schedule {name!r}")
+            schedules.append(_SCHEDULE_CHOICES[name])
+
+    try:
+        spec = Conv2DSpec(
+            batch_size=args.batch_size,
+            in_channels=args.in_channels,
+            input_height=args.input_height,
+            input_width=args.input_width,
+            out_channels=args.out_channels,
+            kernel_height=args.kernel_h,
+            kernel_width=args.kernel_w,
+            stride_height=args.stride_h,
+            stride_width=args.stride_w,
+            padding_height=args.padding_h,
+            padding_width=args.padding_w,
+            dtype=_DTYPE_CHOICES[args.dtype],
+        )
+        sram_bytes = round(args.sram_kib * _KIB)
+        hierarchy = MemoryHierarchy(sram_bytes=sram_bytes)
+        timing_config = TimingConfig(clock_hz=args.clock_ghz * 1e9)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    if args.explore_pe:
+        pe_row_values = _parse_int_list(parser, "--pe-row-values", args.pe_row_values)
+        pe_col_values = _parse_int_list(parser, "--pe-col-values", args.pe_col_values)
+
+        try:
+            arch_result = explore_conv2d_architectures(
+                spec, hierarchy, hardware, timing_config,
+                tile_m_values=tile_m_values, tile_n_values=tile_n_values, tile_k_values=tile_k_values,
+                pe_rows_values=pe_row_values, pe_cols_values=pe_col_values,
+                schedules=schedules, top_k=args.top_k,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+
+        print("Conv2D PE architecture exploration (materialized-im2col GEMM model)")
+        print()
+        print(f"Architectures evaluated: {arch_result.total_architectures}")
+        print(f"Feasible: {arch_result.feasible_architectures}")
+
+        if arch_result.feasible_architectures == 0:
+            print()
+            print("No feasible PE architectures: no tile mapping fit the modeled SRAM.")
+            return
+
+        top = arch_result.ranked[: arch_result.top_k]
+        print()
+        print(f"Top {len(top)} configurations (of {arch_result.feasible_architectures} feasible)")
+        for i, a in enumerate(top, start=1):
+            t = a.evaluation.mapping.timing_result
+            print()
+            print(f"#{i}")
+            print(f"  PE array                 {a.pe_rows} x {a.pe_cols}")
+            print(f"  PE count                 {a.pe_count:,}")
+            print(f"  perfect-overlap          {_format_seconds(t.perfect_overlap_time_seconds)}")
+            print(f"  serialized               {_format_seconds(t.serialized_time_seconds)}")
+            print(f"  DRAM traffic             {_format_bytes(t.dram_bytes)}")
+            print(f"  bottleneck               {t.bottleneck}")
+
+        best = arch_result.ranked[0]
+        print()
+        print(f"Best among searched PE architectures: {best.pe_rows} x {best.pe_cols}")
+        print()
+        _print_conv2d_result(spec, args, PeArray(rows=best.pe_rows, columns=best.pe_cols), best.evaluation)
+    else:
+        pe_array = PeArray(rows=args.pe_rows, columns=args.pe_cols)
+        try:
+            evaluation = evaluate_conv2d(
+                spec, pe_array, hierarchy, hardware, timing_config,
+                tile_m_values=tile_m_values, tile_n_values=tile_n_values, tile_k_values=tile_k_values,
+                schedules=schedules,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+
+        _print_conv2d_result(spec, args, pe_array, evaluation)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -441,7 +596,7 @@ def main(argv: list[str] | None = None) -> None:
                 "--tile-k, and --sram-kib"
             )
 
-    if args.clock_ghz is not None and not args.explore and not args.transformer_block:
+    if args.clock_ghz is not None and not args.explore and not args.transformer_block and not args.conv2d:
         if args.pe_rows is None or any(t is None for t in tile_args) or args.sram_kib is None:
             parser.error(
                 "--clock-ghz requires --pe-rows/--pe-cols, --tile-m/--tile-n/--tile-k, "
@@ -524,8 +679,57 @@ def main(argv: list[str] | None = None) -> None:
             if args.pe_row_values is not None or args.pe_col_values is not None:
                 parser.error("--pe-row-values/--pe-col-values require --explore-pe")
 
-    elif args.explore_pe:
-        parser.error("--explore-pe requires --transformer-block")
+    if args.conv2d:
+        if args.transformer_block:
+            parser.error("--conv2d cannot be combined with --transformer-block")
+        conflicting = (
+            ("--m/--n/--k", any(v is not None for v in (args.m, args.n, args.k))),
+            ("--tile-m/--tile-n/--tile-k", any(t is not None for t in tile_args)),
+            ("--schedule", args.schedule is not None),
+            ("--compare-schedules", args.compare_schedules),
+            ("--explore", args.explore),
+        )
+        conflicts = [name for name, present in conflicting if present]
+        if conflicts:
+            parser.error(f"--conv2d cannot be combined with {', '.join(conflicts)}")
+
+        conv_dims = (
+            ("--batch-size", args.batch_size),
+            ("--in-channels", args.in_channels),
+            ("--input-height", args.input_height),
+            ("--input-width", args.input_width),
+            ("--out-channels", args.out_channels),
+            ("--kernel-h", args.kernel_h),
+            ("--kernel-w", args.kernel_w),
+        )
+        missing_dims = [flag for flag, value in conv_dims if value is None]
+        if missing_dims:
+            parser.error(f"--conv2d requires {', '.join(missing_dims)}")
+
+        if args.sram_kib is None or args.clock_ghz is None:
+            parser.error("--conv2d requires --sram-kib and --clock-ghz")
+        if any(v is None for v in (args.tile_m_values, args.tile_n_values, args.tile_k_values)):
+            parser.error(
+                "--conv2d requires --tile-m-values, --tile-n-values, and --tile-k-values"
+            )
+
+        if args.explore_pe:
+            if args.pe_rows is not None or args.pe_cols is not None:
+                parser.error("--explore-pe cannot be combined with --pe-rows/--pe-cols "
+                             "(use --pe-row-values/--pe-col-values instead)")
+            if args.pe_row_values is None or args.pe_col_values is None:
+                parser.error("--explore-pe requires --pe-row-values and --pe-col-values")
+        else:
+            if args.pe_rows is None or args.pe_cols is None:
+                parser.error(
+                    "--conv2d requires --pe-rows/--pe-cols (fixed architecture), "
+                    "or --explore-pe with --pe-row-values/--pe-col-values"
+                )
+            if args.pe_row_values is not None or args.pe_col_values is not None:
+                parser.error("--pe-row-values/--pe-col-values require --explore-pe")
+
+    elif args.explore_pe and not args.transformer_block:
+        parser.error("--explore-pe requires --transformer-block or --conv2d")
 
     if args.transformer_block:
         hardware = HardwareConfig(
@@ -536,8 +740,17 @@ def main(argv: list[str] | None = None) -> None:
         _run_transformer_block(parser, args, hardware)
         return
 
+    if args.conv2d:
+        hardware = HardwareConfig(
+            peak_compute_flops_per_second=args.peak_tflops * 1e12,
+            memory_bandwidth_bytes_per_second=args.bandwidth_gbps * 1e9,
+            name=args.name,
+        )
+        _run_conv2d(parser, args, hardware)
+        return
+
     if args.m is None or args.n is None or args.k is None:
-        parser.error("--m, --n, and --k are required (unless using --transformer-block)")
+        parser.error("--m, --n, and --k are required (unless using --transformer-block/--conv2d)")
 
     gemm = Gemm(m=args.m, n=args.n, k=args.k, dtype=_DTYPE_CHOICES[args.dtype])
     hardware = HardwareConfig(
