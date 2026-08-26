@@ -190,13 +190,24 @@ bash scripts/demo.sh
 
 ## TensorForge Ops (Phase 2)
 
-TensorForge Core is frozen as a standalone modeling engine.
-`tensorforge_ops` (`src/tensorforge_ops/`) is a separate package built
-around it that logs deterministic Core experiment results to MLflow —
-Core never imports MLflow or `tensorforge_ops`, and continues to run and
-pass its full test suite without an MLflow server. See
-[docs/ops/README.md](docs/ops/README.md) and
-[docs/ops/mlflow-tracking.md](docs/ops/mlflow-tracking.md).
+TensorForge Core (`src/tensorforge/`) is frozen as a standalone
+analytical modeling engine. `tensorforge_ops` (`src/tensorforge_ops/`)
+is a separate package built *around* Core -- the dependency direction is
+strictly `tensorforge_ops -> tensorforge`, never the reverse; Core never
+imports MLflow, PyTorch, or `tensorforge_ops`, and continues to run and
+pass its full test suite with none of those installed.
+
+Ops turns a deterministic Core result into an evidence trail around one
+code/model change: log it to MLflow, actually run the workload and
+measure real latency/throughput/memory, calibrate that against this
+device's own measured compute/memory rates, gate a pull request on
+measured (never predicted) performance, correlate GPU telemetry as
+diagnostic context, plan the cheapest deployment that meets an explicit
+SLO, and finally compose all of that into one model-change report. Every
+stage stays evidence-based and explicit -- no hidden thresholds, no
+composite score, and **no claim about model quality, correctness, or
+business value**; Ops answers "did performance regress, what does
+serving it cost, and what do we still not know," nothing more.
 
 ```bash
 pip install -e ".[ops]"
@@ -206,9 +217,27 @@ python -m tensorforge_ops track --workload-preset gemm_tiny --accelerator-preset
     --tile-m-values 32,64,128 --tile-n-values 32,64,128 --tile-k-values 32,64,128
 ```
 
-## Next phase
+```
+code/model change
+      |
+real benchmark: baseline vs candidate (measured latency/throughput/memory)
+      |
+regression result (PASS / FAIL / ERROR, measured metrics only)
+      |
+GPU telemetry + prediction-vs-measurement validation (context, never a gate)
+      |
+deployment right-sizing against an explicit SLO (measured cost/replicas)
+      |
+model-change impact report: PERFORMANCE_READY / PERFORMANCE_BLOCKED / REVIEW_REQUIRED
+```
 
-Further ML Systems / MLOps work (real benchmark measurement, predicted-
-vs-measured validation, CI performance regression, hardware right-sizing)
-builds on top of the deterministic experiment interface Core and Ops
-already expose — never inside Core itself.
+See [docs/ops/README.md](docs/ops/README.md) for the full package layout
+and every milestone doc, including
+[docs/ops/mlflow-tracking.md](docs/ops/mlflow-tracking.md) and
+[docs/ops/model-change-impact.md](docs/ops/model-change-impact.md).
+
+Ops is a set of composable evidence and gating tools, not a fully
+automated MLOps platform: it does not train models, does not deploy
+anything, does not fetch live cloud prices, and does not decide whether
+a model change is *good* -- only whether measured performance and
+deployment evidence support calling it performance-ready.

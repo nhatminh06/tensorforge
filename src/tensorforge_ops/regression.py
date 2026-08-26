@@ -202,6 +202,14 @@ class MetricComparison:
         }
 
 
+def metric_comparison_from_dict(d: dict) -> MetricComparison:
+    return MetricComparison(
+        metric=d["metric"], baseline_value=d["baseline_value"], candidate_value=d["candidate_value"],
+        absolute_delta=d["absolute_delta"], relative_delta=d["relative_delta"],
+        allowed_regression=d["allowed_regression"], status=d["status"], detail=d.get("detail", ""),
+    )
+
+
 def _compare_metric(metric: str, baseline: BenchmarkResult, candidate: BenchmarkResult, policy: MetricPolicy | None) -> MetricComparison:
     baseline_value = _extract_metric_value(baseline, metric)
     candidate_value = _extract_metric_value(candidate, metric)
@@ -345,6 +353,34 @@ class RegressionResult:
         import json
 
         return json.dumps(self.to_dict(), sort_keys=True, indent=indent)
+
+
+def regression_result_from_dict(d: dict) -> RegressionResult:
+    workload = d["workload"]
+    fingerprints = d["core_fingerprints"]
+    iterations = d["iterations"]
+    runtime_metadata = d["runtime_metadata"]
+    return RegressionResult(
+        status=d["status"], error_message=d["error_message"],
+        workload_preset=workload["preset"], workload_kind=workload["kind"],
+        backend=d["backend"], device=d["device"], dtype=d["dtype"],
+        baseline_core_fingerprint=fingerprints["baseline"], candidate_core_fingerprint=fingerprints["candidate"],
+        baseline_warmup_iterations=iterations["baseline"]["warmup"],
+        baseline_measured_iterations=iterations["baseline"]["measured"],
+        candidate_warmup_iterations=iterations["candidate"]["warmup"],
+        candidate_measured_iterations=iterations["candidate"]["measured"],
+        baseline_runtime_metadata=dict(runtime_metadata["baseline"]),
+        candidate_runtime_metadata=dict(runtime_metadata["candidate"]),
+        metric_comparisons=tuple(metric_comparison_from_dict(m) for m in d["metrics"]),
+        regression_result_schema_version=d.get("regression_result_schema_version", REGRESSION_RESULT_SCHEMA_VERSION),
+    )
+
+
+def load_regression_result(path: str) -> RegressionResult:
+    import json
+
+    with open(path, encoding="utf-8") as f:
+        return regression_result_from_dict(json.load(f))
 
 
 def _error_result(message: str, baseline: BenchmarkResult | None = None, candidate: BenchmarkResult | None = None) -> RegressionResult:

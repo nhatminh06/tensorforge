@@ -47,6 +47,14 @@ from tensorforge_ops.sizing import (
     load_slo_policy,
     render_sizing_markdown_report,
 )
+from tensorforge_ops.impact import (
+    READINESS_BLOCKED,
+    READINESS_READY,
+    build_impact_result,
+    load_impact_manifest,
+    load_impact_policy,
+    render_impact_markdown_report,
+)
 from tensorforge_ops.tracking import (
     DEFAULT_EXPERIMENT_NAME,
     TrackingConfig,
@@ -57,6 +65,7 @@ from tensorforge_ops.tracking import (
     log_telemetry,
     log_telemetry_correlation,
     log_sizing_plan,
+    log_impact_result,
     log_validation_result,
     log_validation_summary,
     resolve_tracking_uri,
@@ -79,7 +88,12 @@ def _parse_int_list(parser: argparse.ArgumentParser, flag: str, raw: str) -> lis
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tensorforge_ops",
-        description="Track TensorForge Core experiment results in MLflow.",
+        description=(
+            "Evidence and gating tools built around TensorForge Core: MLflow "
+            "tracking, real benchmarking, calibration/validation, PR "
+            "regression gating, GPU telemetry, deployment right-sizing, and "
+            "model-change impact reporting."
+        ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -182,6 +196,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-track", action="store_true",
         help="Run validation without logging to MLflow (prints the summary only).",
     )
+    validate.add_argument("--output-json", default=None, help="Path to save the ValidationResult JSON.")
+    validate.add_argument("--force", action="store_true", help="Overwrite --output-json if it already exists.")
 
     validate_suite = sub.add_parser(
         "validate-suite",
@@ -251,6 +267,25 @@ def _build_parser() -> argparse.ArgumentParser:
     right_size.add_argument(
         "--track", action="store_true",
         help="Log the sizing plan to MLflow as its own run (off by default -- the planner works fully offline).",
+    )
+
+    impact = sub.add_parser(
+        "impact",
+        help="Compose regression/sizing/telemetry/validation/Core evidence into one model-change readiness report.",
+    )
+    impact.add_argument("--manifest", required=True, help="Path to an ImpactManifest JSON.")
+    impact.add_argument("--policy", required=True, help="Path to an ImpactPolicy JSON.")
+    impact.add_argument("--output-json", default=None, help="Path to save the ImpactResult JSON.")
+    impact.add_argument("--output-markdown", default=None, help="Path to save the Markdown report.")
+    impact.add_argument(
+        "--force", action="store_true", help="Overwrite --output-json/--output-markdown if they already exist.",
+    )
+    impact.add_argument("--tracking-uri", default=None)
+    impact.add_argument("--experiment", default=DEFAULT_EXPERIMENT_NAME)
+    impact.add_argument("--run-name", default=None)
+    impact.add_argument(
+        "--track", action="store_true",
+        help="Log the impact report to MLflow as its own run (off by default -- composition works fully offline).",
     )
 
     return parser
@@ -656,7 +691,14 @@ def _run_validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         log_calibration_profile(tracking, tracked.run_id, profile)
         log_validation_result(tracking, tracked.run_id, validation)
 
+    if args.output_json is not None:
+        _write_output_file(parser, args.output_json, validation.to_json(), args.force)
+
     _print_validation_result(args.workload_preset, preset.kind, profile, validation)
+
+    if args.output_json is not None:
+        print()
+        print(f"Saved to {args.output_json}")
 
     if tracked is not None:
         print()
@@ -977,6 +1019,83 @@ def _run_right_size(parser: argparse.ArgumentParser, args: argparse.Namespace) -
     return 0 if plan.recommended_candidate_id is not None else 2
 
 
+def _run_impact(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Exit-code contract (deliberately parallels `regression`'s 0/1/2
+    convention, but is its own distinct contract for a distinct concern
+    -- model-change readiness reporting, not PR performance gating):
+        0 -> PERFORMANCE_READY
+        1 -> REVIEW_REQUIRED, or a configuration/operational error
+        2 -> PERFORMANCE_BLOCKED
+    Output-file overwrite errors are handled without argparse's
+    parser.error() (which always exits 2) so they cannot collide with
+    the "2 == BLOCKED" convention -- the same fix applied to `regression`
+    and `right-size` in earlier milestones.
+    """
+    try:
+        manifest = load_impact_manifest(args.manifest)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"error: could not load --manifest {args.manifest!r}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        policy = load_impact_policy(args.policy)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"error: could not load --policy {args.policy!r}: {exc}", file=sys.stderr)
+        return 1
+
+    result = build_impact_result(manifest, policy)
+    report = render_impact_markdown_report(result)
+
+    for path, text in ((args.output_json, result.to_json()), (args.output_markdown, report)):
+        if path is None:
+            continue
+        if os.path.exists(path) and not args.force:
+            print(f"error: {path} already exists; pass --force to overwrite", file=sys.stderr)
+            return 1
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    print("TensorForge Model-Change Impact")
+    print()
+    print(f"Recommendation: {result.readiness}")
+    if result.decision_reasons:
+        print(f"Reasons: {', '.join(result.decision_reasons)}")
+    print()
+    print(f"Regression gate: {result.regression_status}")
+    di = result.deployment_impact
+    print(
+        f"Deployment: {di.baseline_recommended_candidate_id or 'n/a'} -> {di.candidate_recommended_candidate_id or 'n/a'}, "
+        f"replicas {di.baseline_replicas if di.baseline_replicas is not None else 'n/a'} -> "
+        f"{di.candidate_replicas if di.candidate_replicas is not None else 'n/a'}"
+    )
+    if di.hourly_cost_absolute_delta is not None:
+        print(f"Hourly cost change: {di.hourly_cost_absolute_delta:+.2f} ({_format_impact_pct(di.hourly_cost_relative_delta)})")
+    print()
+    print(result.model_quality_disclaimer)
+
+    if args.track:
+        tracking_uri = resolve_tracking_uri(args.tracking_uri)
+        tracking = TrackingConfig(tracking_uri=tracking_uri, experiment_name=args.experiment)
+        run_id = log_impact_result(tracking, result, report_markdown=report, run_name=args.run_name)
+        print()
+        print("MLflow")
+        print(f"  experiment                 {tracking.experiment_name}")
+        print(f"  run id                     {run_id}")
+
+    if args.output_markdown is not None:
+        print()
+        print(f"Report: {args.output_markdown}")
+
+    if result.readiness == READINESS_READY:
+        return 0
+    if result.readiness == READINESS_BLOCKED:
+        return 2
+    return 1
+
+
+def _format_impact_pct(fraction) -> str:
+    return f"{fraction * 100:+.1f}%" if fraction is not None else "n/a"
+
+
 def _run_telemetry_probe(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     from tensorforge_ops.telemetry_nvml import NvmlUnavailableError, probe_capabilities
 
@@ -1037,6 +1156,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_telemetry(parser, args)
     elif args.command == "right-size":
         return _run_right_size(parser, args)
+    elif args.command == "impact":
+        return _run_impact(parser, args)
     return 0
 
 

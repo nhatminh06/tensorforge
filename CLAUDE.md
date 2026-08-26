@@ -1199,3 +1199,41 @@ TensorForge Core (`src/tensorforge/`) is frozen as a modeling boundary.
 - missing SLO evidence (e.g. no p95, no peak-memory metric) is
   INSUFFICIENT_EVIDENCE, never treated as zero or as a silent pass.
 - No AI attribution.
+
+
+## TensorForge Ops (Phase 2, Milestone 17 -- final)
+
+- The model-change impact report (`tensorforge_ops.impact`) is a
+  performance-and-infrastructure readiness recommendation only -- never
+  model quality, correctness, or business value. Every report carries
+  the disclaimer verbatim: "TensorForge Ops does not assess model
+  quality or correctness. This recommendation covers measured
+  performance and deployment/infrastructure evidence only."
+- Readiness states are `PERFORMANCE_READY` / `PERFORMANCE_BLOCKED` /
+  `REVIEW_REQUIRED`, never a bare "safe to promote."
+- No composite or weighted score, ever (no "impact score = 87/100").
+  Evidence stays separate; only an explicit `ImpactPolicy` turns it into
+  a decision.
+- `RegressionResult` (measured performance) and `SizingPlanResult`
+  (measured deployment feasibility/cost) are the only evidence that can
+  gate readiness. Core's analytical result, `ValidationResult`, and
+  `TelemetrySummary`/telemetry correlation are context only and must
+  never override a measured decision -- a cheaper deployment never
+  overrides a failed regression, and a better/worse analytical
+  prediction never overrides a failed regression.
+- No hidden numeric thresholds: cost/replica policy limits
+  (`max_hourly_cost_increase_fraction`, `max_monthly_cost_increase_fraction`,
+  `max_replica_increase`) default to unenforced and must come from an
+  explicit, committed `ImpactPolicy` file passed on the command line.
+- Missing or invalid required evidence (e.g. no candidate sizing when
+  the policy requires deployment feasibility, a regression comparison
+  that errored) is `REVIEW_REQUIRED`, never fabricated into a pass or a
+  fail.
+- Never recompute a Core result fingerprint by re-hashing a saved
+  `core-result.json` file; always read the fingerprint already recorded
+  on `RegressionResult`/`BenchmarkResult` (the saved file has a trailing
+  newline the canonical fingerprint hash does not include).
+- The impact report composes already-computed evidence artifacts only
+  -- it never re-runs a benchmark, telemetry window, calibration probe,
+  or sizing plan.
+- No AI attribution.
