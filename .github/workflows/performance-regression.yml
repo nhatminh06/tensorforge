@@ -160,11 +160,11 @@ jobs:
             --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" | head -n1)
 
           if [ -n "$existing_id" ]; then
-            gh api --method PATCH "repos/${{ github.repository }}/issues/comments/$existing_id" \
-              -f body=@"$BODY_FILE"
+            jq -n --rawfile body "$BODY_FILE" '{body: $body}' \
+              | gh api --method PATCH "repos/${{ github.repository }}/issues/comments/$existing_id" --input -
           else
-            gh api --method POST "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
-              -f body=@"$BODY_FILE"
+            jq -n --rawfile body "$BODY_FILE" '{body: $body}' \
+              | gh api --method POST "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" --input -
           fi
 
       - name: Gate on regression result
