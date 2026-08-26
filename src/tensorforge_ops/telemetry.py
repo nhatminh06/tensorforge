@@ -346,6 +346,13 @@ def telemetry_summary_from_dict(d: dict) -> TelemetrySummary:
     )
 
 
+def load_telemetry_summary(path: str) -> TelemetrySummary:
+    import json
+
+    with open(path, encoding="utf-8") as f:
+        return telemetry_summary_from_dict(json.load(f))
+
+
 def summarize_telemetry_trace(trace: TelemetryTrace) -> TelemetrySummary:
     """Pure, deterministic summary over a fixed TelemetryTrace. A metric
     with zero non-None samples across the whole trace gets an

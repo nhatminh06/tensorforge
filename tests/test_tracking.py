@@ -8,7 +8,7 @@ mlflow = pytest.importorskip("mlflow")
 from mlflow.tracking import MlflowClient
 
 from tensorforge.experiments import ExperimentSpec, run_experiment
-from tensorforge_ops.benchmark import BenchmarkConfig, BenchmarkResult, compute_latency_statistics
+from tensorforge_ops.benchmark import BenchmarkConfig, BenchmarkResult, LatencyStatistics, compute_latency_statistics
 from tensorforge_ops.calibration import (
     compute_calibration_fingerprint,
     predict,
@@ -22,12 +22,20 @@ from tensorforge_ops.telemetry import (
     correlate_telemetry,
     summarize_telemetry_trace,
 )
+from tensorforge_ops.sizing import (
+    DeploymentCandidate,
+    DeploymentCatalog,
+    SloPolicy,
+    build_sizing_plan,
+    render_sizing_markdown_report,
+)
 from tensorforge_ops.tracking import (
     TrackingConfig,
     compute_result_fingerprint,
     list_runs,
     log_benchmark_result,
     log_calibration_profile,
+    log_sizing_plan,
     log_telemetry,
     log_telemetry_correlation,
     log_validation_result,
@@ -570,6 +578,52 @@ def test_log_telemetry_correlation_attaches_artifact_and_tags(tmp_path):
     local_path = client.download_artifacts(tracked.run_id, "telemetry-correlation.json", str(tmp_path))
     with open(local_path, encoding="utf-8") as f:
         assert f.read() == correlation.to_json()
+
+
+# --- logging a right-sizing plan (Milestone 16) as its own MLflow run -------------
+
+def make_sizing_plan():
+    from decimal import Decimal
+
+    # compute_latency_statistics() only derives a p95 with >= 20 samples,
+    # so build LatencyStatistics directly with an explicit p95 here --
+    # this fixture only needs a FEASIBLE candidate, not a real timing run.
+    stats = LatencyStatistics(
+        count=5, mean_seconds=0.0098, p50_seconds=0.0098, p95_seconds=0.011, p99_seconds=None,
+        min_seconds=0.009, max_seconds=0.011, throughput_per_second=102.0,
+    )
+    bench = BenchmarkResult(
+        core_result_fingerprint="sha256:" + "0" * 64, workload_preset="gemm_tiny", workload_kind="gemm",
+        backend="pytorch", device="cuda:0", dtype="fp16", warmup_iterations=1, measured_iterations=5,
+        latency_samples_seconds=(0.01, 0.011, 0.009, 0.0105, 0.0095), statistics=stats,
+        peak_memory_allocated_bytes=None, runtime_metadata={"torch_version": "2.13.0"},
+    )
+    candidate = DeploymentCandidate("gpu-a", bench, Decimal("0.50"), "USD")
+    catalog = DeploymentCatalog(1, "USD", (candidate,))
+    slo = SloPolicy(required_invocations_per_second=10.0, max_p95_latency_seconds=0.02)
+    return build_sizing_plan(catalog, slo)
+
+
+def test_log_sizing_plan_creates_its_own_run(tmp_path):
+    tracking = tracking_config(tmp_path)
+    plan = make_sizing_plan()
+    report = render_sizing_markdown_report(plan)
+
+    run_id = log_sizing_plan(tracking, plan, report_markdown=report)
+
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    run = client.get_run(run_id)
+    assert run.data.tags["tensorforge.sizing"] == "measured"
+    assert run.data.tags["tensorforge.recommended_candidate"] == "gpu-a"
+    assert run.data.metrics["sizing_feasible_candidate_count"] == 1
+    assert run.data.metrics["sizing_recommended_hourly_cost"] == pytest.approx(0.50)
+
+    result_path = client.download_artifacts(run_id, "sizing-result.json", str(tmp_path))
+    with open(result_path, encoding="utf-8") as f:
+        assert f.read() == plan.to_json()
+    report_path = client.download_artifacts(run_id, "sizing-report.md", str(tmp_path))
+    with open(report_path, encoding="utf-8") as f:
+        assert f.read() == report
 
 
 # --- Core boundary: no MLflow import anywhere under src/tensorforge/ --------------

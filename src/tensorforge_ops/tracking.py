@@ -51,6 +51,7 @@ from tensorforge_ops.calibration import (
     ValidationSummary,
     compute_calibration_fingerprint,
 )
+from tensorforge_ops.sizing import SizingPlanResult
 
 DEFAULT_EXPERIMENT_NAME = "tensorforge"
 
@@ -564,6 +565,57 @@ def log_telemetry_correlation(tracking: TrackingConfig, run_id: str, correlation
         with open(path, "w", encoding="utf-8") as f:
             f.write(correlation.to_json())
         client.log_artifact(run_id, path)
+
+
+def log_sizing_plan(
+    tracking: TrackingConfig,
+    plan: SizingPlanResult,
+    report_markdown: str | None = None,
+    run_name: str | None = None,
+) -> str:
+    """Log a SizingPlanResult (Milestone 16) as its own new MLflow run --
+    a sizing plan spans multiple candidates/benchmark runs, so it does
+    not belong to any single existing run. Never modifies
+    core-result.json/benchmark-result.json/validation-result.json/
+    telemetry artifacts on any other run. Returns the created run_id.
+    """
+    mlflow.set_tracking_uri(tracking.tracking_uri)
+    mlflow.set_experiment(tracking.experiment_name)
+
+    with mlflow.start_run(run_name=run_name or "sizing-plan") as run:
+        metrics = {}
+        if plan.required_invocations_per_second is not None:
+            metrics["sizing_required_invocations_per_second"] = plan.required_invocations_per_second
+        metrics["sizing_feasible_candidate_count"] = plan.feasible_candidate_count
+
+        recommended = None
+        if plan.recommended_candidate_id is not None:
+            recommended = next(c for c in plan.candidate_plans if c.candidate_id == plan.recommended_candidate_id)
+            metrics["sizing_recommended_replicas"] = recommended.required_replicas
+            metrics["sizing_recommended_hourly_cost"] = float(recommended.total_hourly_cost)
+            if recommended.monthly_cost is not None:
+                metrics["sizing_recommended_monthly_cost"] = float(recommended.monthly_cost)
+            if recommended.measured_p95_latency_seconds is not None:
+                metrics["sizing_recommended_p95_seconds"] = recommended.measured_p95_latency_seconds
+            metrics["sizing_recommended_usable_capacity_per_second"] = recommended.usable_capacity_per_replica
+        mlflow.log_metrics(metrics)
+
+        tags = {
+            "tensorforge.sizing": "measured",
+            "tensorforge.sizing_result_schema_version": str(plan.sizing_result_schema_version),
+            "tensorforge.recommended_candidate": plan.recommended_candidate_id or "",
+        }
+        if plan.currency is not None:
+            tags["currency"] = plan.currency
+        mlflow.set_tags(tags)
+
+        _log_text_artifact(plan.to_json(), "sizing-result.json")
+        if report_markdown is not None:
+            _log_text_artifact(report_markdown, "sizing-report.md")
+
+        run_id = run.info.run_id
+
+    return run_id
 
 
 def list_runs(tracking: TrackingConfig, max_results: int = 20) -> tuple[dict, ...]:

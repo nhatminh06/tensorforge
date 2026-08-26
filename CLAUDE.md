@@ -1172,4 +1172,30 @@ TensorForge Core (`src/tensorforge/`) is frozen as a modeling boundary.
   fan curves, or performance states -- telemetry is observation-only.
 - DCGM profiling-metric availability must be proven at runtime
   (capability query), never assumed from a device name or vendor claim.
+- hardware sizing/right-sizing decisions are based on measured
+  BenchmarkResult evidence, never on TensorForge's predicted/calibrated
+  latency or a workload's analytical bottleneck classification.
+- analytical/telemetry data attached to a deployment candidate provides
+  diagnostic context only -- it never overrides a measured feasibility
+  status or changes a ranking.
+- steady-state benchmark throughput is a per-replica capacity proxy, not
+  production QPS or load-tested HTTP throughput; benchmark p95 is
+  workload latency, not end-to-end service latency -- both must be
+  stated explicitly wherever they are reported.
+- replica scaling is assumed perfectly linear (total_capacity = replicas
+  * per_replica_capacity); this assumption must be stated, never hidden.
+- capacity headroom defaults to 0.0 -- no operational safety margin is
+  invented; a caller must request one explicitly.
+- deployment/cloud pricing is entirely user-supplied, with provenance
+  (provider/region/source/as-of) preserved where given; no price is
+  fetched, hard-coded, or verified over the network, and no currency
+  conversion is performed -- mixed currencies in one plan are rejected.
+- a right-sizing recommendation is the cheapest FEASIBLE candidate among
+  the supplied candidates only -- never a claim of a global/theoretical
+  optimum.
+- no queueing-theory model (M/M/1, M/M/c, Little's Law, request
+  concurrency, dynamic batching, autoscaler dynamics) is used unless a
+  future milestone explicitly adds one.
+- missing SLO evidence (e.g. no p95, no peak-memory metric) is
+  INSUFFICIENT_EVIDENCE, never treated as zero or as a silent pass.
 - No AI attribution.

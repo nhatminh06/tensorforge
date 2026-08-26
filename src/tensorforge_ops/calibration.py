@@ -468,6 +468,41 @@ class ValidationResult:
         return json.dumps(self.to_dict(), sort_keys=True, indent=indent)
 
 
+def validation_result_from_dict(d: dict) -> ValidationResult:
+    workload = d["workload"]
+    prediction = d["prediction"]
+    measurement = d["measurement"]
+    error = d["error"]
+    return ValidationResult(
+        core_result_fingerprint=d["core_result_fingerprint"],
+        calibration_fingerprint=d["calibration_fingerprint"],
+        workload_preset=workload["preset"],
+        workload_kind=workload["kind"],
+        backend=d["backend"],
+        device=d["device"],
+        dtype=d["dtype"],
+        predicted_compute_seconds=prediction["compute_seconds"],
+        predicted_memory_seconds=prediction["memory_seconds"],
+        predicted_latency_seconds=prediction["latency_seconds"],
+        predicted_bottleneck=prediction["bottleneck"],
+        measured_p50_latency_seconds=measurement["p50_latency_seconds"],
+        measured_mean_latency_seconds=measurement["mean_latency_seconds"],
+        measured_p95_latency_seconds=measurement["p95_latency_seconds"],
+        signed_error_seconds=error["signed_error_seconds"],
+        absolute_error_seconds=error["absolute_error_seconds"],
+        relative_error=error["relative_error"],
+        absolute_percentage_error=error["absolute_percentage_error"],
+        measured_to_predicted_ratio=error["measured_to_predicted_ratio"],
+    )
+
+
+def load_validation_result(path: str) -> ValidationResult:
+    import json
+
+    with open(path, encoding="utf-8") as f:
+        return validation_result_from_dict(json.load(f))
+
+
 def validate_prediction(
     profile: DeviceCalibrationProfile,
     prediction: CalibratedPrediction,

@@ -71,6 +71,18 @@ its full test suite with no MLflow installed at all.
   GPU+OS combination). This does not add automated root-cause diagnosis,
   Nsight/CUPTI integration, hardware cost modeling, or right-sizing (all
   later milestones).
+- **Milestone 16** added a **hardware right-sizing + inference SLO/cost
+  planner** (`tensorforge_ops.sizing`): pure arithmetic over already-
+  measured `BenchmarkResult` evidence (steady-state throughput/p95 as
+  explicit capacity/latency proxies, never claimed to be production
+  QPS or end-to-end latency) determines the cheapest user-supplied
+  deployment candidate satisfying an explicit SLO — replica count,
+  headroom, and cost are transparent formulas, not a queueing-theory
+  model, and TelemetrySummary/ValidationResult attach only as
+  diagnostic context that never changes feasibility or ranking — see
+  [right-sizing.md](right-sizing.md). No cloud prices are hard-coded or
+  fetched; pricing is entirely user-supplied. This does not add a
+  model-change impact report (a later milestone).
 
 ## Package layout
 
@@ -97,8 +109,11 @@ src/tensorforge_ops/
                             correlate_telemetry() (no torch/NVML/MLflow dependency)
     telemetry_nvml.py        NvmlProvider, run_telemetry_window(), probe_capabilities() --
                             imports pynvml (nvidia-ml-py), imported lazily by the CLI
+    sizing.py                DeploymentCandidate, DeploymentCatalog, SloPolicy,
+                            build_sizing_plan() (no torch/NVML/MLflow dependency)
     cli.py                 python -m tensorforge_ops track / list-runs / benchmark /
-                            calibrate / validate / validate-suite / regression / telemetry
+                            calibrate / validate / validate-suite / regression / telemetry /
+                            right-size
     __main__.py
 ```
 
@@ -209,6 +224,23 @@ report -- evidence only, never part of the PASS/FAIL decision. See
 [gpu-telemetry.md](gpu-telemetry.md) for metric semantics, sampling
 methodology, and live RTX 3050 results.
 
+## Hardware right-sizing / SLO-cost planning (Milestone 16)
+
+```bash
+python -m tensorforge_ops right-size \
+    --catalog deployment-catalog.json --slo inference-slo.json \
+    --output-json sizing-result.json --output-markdown sizing-report.md
+```
+
+Given a catalog of measured `BenchmarkResult` candidates and explicit
+user-supplied hourly pricing, determines the cheapest candidate that
+satisfies an explicit latency/throughput SLO -- replica count and cost
+are transparent arithmetic over measured steady-state throughput (never
+claimed to be production QPS), never a queueing model. No cloud price is
+fetched or hard-coded. See [right-sizing.md](right-sizing.md) for the
+full methodology and a live demo combining real RTX 3050 evidence with
+labeled synthetic peers.
+
 ## Current end-to-end flow
 
 ```
@@ -225,7 +257,8 @@ prediction-vs-measurement validation (Milestone 13)
 PR performance regression guard (Milestone 14)
       |
 GPU telemetry correlation (Milestone 15)
+      |
+hardware right-sizing / SLO-cost planning (Milestone 16)
 ```
 
-Hardware right-sizing/cost planning and a model-change impact report are
-future milestones, not yet implemented.
+A model-change impact report is a future milestone, not yet implemented.
