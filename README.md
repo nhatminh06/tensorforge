@@ -6,28 +6,32 @@ capacity. It starts from analytical models and adds architectural detail
 incrementally (PE arrays, memory hierarchy, tiling, dataflows, convolution,
 Transformer operations).
 
-## Current model (Milestone 8)
+## Current model (Milestone 9)
 
 Analytical GEMM + roofline + rectangular PE mapping + SRAM capacity +
 explicit GEMM tiling traffic under three explicit loop-order/residency
 schedules (`c-resident`, `a-resident`, `b-resident`) + analytical
 compute/memory execution timing + a bounded, deterministic design-space
 explorer over user-supplied tile/schedule/PE-array candidates + GEMM-only
-Transformer-block workload modeling (Q/K/V/output projections, attention
-scores/value, MLP up/down) with per-operation tile/schedule mapping on
-one shared, fixed PE array, and PE-architecture comparison across the
-whole block. TensorForge can model the GEMM-heavy portion of a
-Transformer block and compare bounded PE-array configurations using
-per-operation tile/schedule exploration — it does **not** simulate
-Transformer inference: softmax, normalization, activation, and residual
-operations are explicitly unmodeled, and there is no head parallelism,
-fusion, KV cache, or decoding loop. TensorForge is a design-space
-explorer, not an architecture optimizer. There is no continuous/automatic
-architecture search, no systolic timing, and no cycle accuracy. All
-numbers come from closed-form formulas over a `Gemm`, a `HardwareConfig`,
-an optional `PeArray`, an optional `MemoryHierarchy`, an optional
-`GemmTile` + `GemmSchedule`, an optional `TimingConfig`, an optional
-bounded `explore()` search, and an optional `TransformerBlockSpec`
+Transformer-block workload modeling + Conv2D/CNN workload modeling
+lowered through an explicit **materialized-im2col** GEMM model. Both
+Transformer and Conv2D workloads reuse the same PE/SRAM/tiling/schedule/
+timing/exploration machinery — they only derive `Gemm` shapes and let
+each operation/layer pick its own mapping on one shared, fixed PE array.
+TensorForge models GEMM, GEMM-heavy Transformer blocks, and Conv2D
+workloads — it does **not** simulate Transformer inference or CNN
+inference: softmax, normalization, activation, pooling, and residual
+operations are explicitly unmodeled, there is no head parallelism,
+fusion, KV cache, decoding loop, or cross-layer SRAM residency, and
+convolution traffic is materialized-im2col traffic, not direct-
+convolution traffic. TensorForge is a design-space explorer, not an
+architecture optimizer, and not a complete CNN/Transformer simulator.
+There is no continuous/automatic architecture search, no systolic timing,
+and no cycle accuracy. All numbers come from closed-form formulas over a
+`Gemm`, a `HardwareConfig`, an optional `PeArray`, an optional
+`MemoryHierarchy`, an optional `GemmTile` + `GemmSchedule`, an optional
+`TimingConfig`, an optional bounded `explore()` search, an optional
+`TransformerBlockSpec`, and an optional `Conv2DSpec`/`CnnWorkload`
 composing all of the above.
 
 ## Equations
@@ -177,6 +181,27 @@ softmax, normalization, activation, and residual additions are excluded,
 not free. PE-array shapes can also be compared across the whole block.
 See [docs/transformer.md](docs/transformer.md).
 
+### Conv2D / CNN (materialized-im2col lowering, optional, requires SRAM + clock)
+
+```
+GEMM M = batch_size * output_height * output_width
+GEMM N = out_channels
+GEMM K = in_channels * kernel_height * kernel_width
+
+im2col_bytes = M * K * bytes_per_element   (== Gemm A bytes)
+im2col_expansion_ratio = im2col_bytes / logical_input_bytes
+```
+
+Lowers Conv2D to a GEMM via **materialized im2col** — the full
+activation-patch matrix, including every duplicated overlapping pixel —
+then evaluates it through the same PE/tiling/schedule/timing model as any
+other GEMM. This is explicitly *not* direct-convolution traffic: a real
+direct-convolution dataflow would generally move far less data. A
+`CnnWorkload` chains an ordered sequence of Conv2D layers (each layer's
+input shape derived from the previous layer's output) and aggregates
+their timing/traffic on one shared, fixed PE array, sequentially, with no
+cross-layer SRAM residency. See [docs/convolution.md](docs/convolution.md).
+
 ## Build / run
 
 ```bash
@@ -267,6 +292,21 @@ python -m tensorforge --transformer-block \
     --tile-m-values 16,32,64 --tile-n-values 16,32,64 --tile-k-values 16,32,64
 ```
 
+Use `--conv2d` (with `--batch-size`, `--in-channels`/`--input-height`/
+`--input-width`, `--out-channels`, `--kernel-h`/`--kernel-w`, optional
+`--stride-h`/`--stride-w`/`--padding-h`/`--padding-w`, `--sram-kib`,
+`--clock-ghz`, tile candidate lists, and either `--pe-rows`/`--pe-cols`
+or `--explore-pe`) to model one Conv2D layer's materialized-im2col GEMM:
+
+```bash
+python -m tensorforge --conv2d \
+    --batch-size 1 --in-channels 64 --input-height 56 --input-width 56 \
+    --out-channels 128 --kernel-h 3 --kernel-w 3 --padding-h 1 --padding-w 1 \
+    --dtype fp16 --peak-tflops 100 --bandwidth-gbps 100 --sram-kib 512 \
+    --clock-ghz 1 --pe-rows 32 --pe-cols 32 \
+    --tile-m-values 16,32,64 --tile-n-values 16,32,64 --tile-k-values 16,32,64
+```
+
 ## Limitations
 
 - GEMM only; no convolution or Transformer operations yet.
@@ -307,6 +347,14 @@ python -m tensorforge --transformer-block \
   (excluded, not free). Attention heads execute sequentially (no head
   parallelism); no QKV/attention fusion, no cross-operation SRAM
   residency, no KV cache, no decoding loop, no power/energy model.
+- Conv2D/CNN modeling (Milestone 9) uses one explicit materialized-im2col
+  lowering — not direct/implicit convolution, not Winograd, not FFT
+  convolution. No depthwise, grouped, dilated, or transposed convolution.
+  No activation/normalization/pooling/residual timing. No cross-layer
+  SRAM residency in `CnnWorkload`. Materialized-im2col DRAM traffic can
+  substantially exceed the logical input tensor's size for kernels larger
+  than 1x1 — this is the modeled quantity, not real CNN accelerator
+  traffic.
 - Not validated against real hardware; not cycle-accurate.
 
 ## Roadmap
