@@ -5,6 +5,7 @@ from tensorforge_ops.benchmark import (
     BenchmarkConfig,
     BenchmarkResult,
     LatencyStatistics,
+    benchmark_result_from_dict,
     compute_latency_statistics,
     run_timed_iterations,
 )
@@ -165,3 +166,29 @@ def test_benchmark_result_to_dict_and_json():
     import json
     parsed = json.loads(result.to_json())
     assert parsed == data
+
+
+def test_benchmark_result_from_dict_roundtrip():
+    stats = compute_latency_statistics([0.001, 0.002, 0.0015])
+    result = BenchmarkResult(
+        core_result_fingerprint="sha256:abc123", workload_preset="gemm_tiny", workload_kind="gemm",
+        backend="pytorch", device="cpu", dtype="fp32", warmup_iterations=2, measured_iterations=3,
+        latency_samples_seconds=(0.001, 0.002, 0.0015), statistics=stats,
+        peak_memory_allocated_bytes=1234, runtime_metadata={"torch_version": "2.13.0"},
+    )
+    restored = benchmark_result_from_dict(result.to_dict())
+    assert restored.to_json() == result.to_json()
+
+
+def test_benchmark_result_from_dict_rejects_schema_mismatch():
+    stats = compute_latency_statistics([0.001, 0.002, 0.0015])
+    result = BenchmarkResult(
+        core_result_fingerprint="sha256:abc123", workload_preset="gemm_tiny", workload_kind="gemm",
+        backend="pytorch", device="cpu", dtype="fp32", warmup_iterations=2, measured_iterations=3,
+        latency_samples_seconds=(0.001, 0.002, 0.0015), statistics=stats,
+        peak_memory_allocated_bytes=None, runtime_metadata={},
+    )
+    d = result.to_dict()
+    d["benchmark_schema_version"] = 999
+    with pytest.raises(ValueError, match="schema version mismatch"):
+        benchmark_result_from_dict(d)

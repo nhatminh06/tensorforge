@@ -3,7 +3,9 @@ from tensorforge_ops.benchmark import (
     BenchmarkConfig,
     BenchmarkResult,
     LatencyStatistics,
+    benchmark_result_from_dict,
     compute_latency_statistics,
+    load_benchmark_result,
     run_timed_iterations,
 )
 from tensorforge_ops.calibration import (
@@ -23,13 +25,34 @@ from tensorforge_ops.calibration import (
     summarize_validation_results,
     validate_prediction,
 )
+from tensorforge_ops.regression import (
+    KNOWN_METRICS,
+    REGRESSION_POLICY_SCHEMA_VERSION,
+    REGRESSION_RESULT_SCHEMA_VERSION,
+    STATUS_ERROR,
+    STATUS_FAIL,
+    STATUS_NOT_COMPARABLE,
+    STATUS_PASS,
+    MetricComparison,
+    MetricPolicy,
+    RegressionPolicy,
+    RegressionResult,
+    RegressionSuiteResult,
+    compare_benchmark_results,
+    compare_regression_suite,
+    load_regression_policy,
+    regression_policy_from_dict,
+    render_markdown_report,
+)
 
 __all__ = [
     "BENCHMARK_SCHEMA_VERSION",
     "BenchmarkConfig",
     "BenchmarkResult",
     "LatencyStatistics",
+    "benchmark_result_from_dict",
     "compute_latency_statistics",
+    "load_benchmark_result",
     "run_timed_iterations",
     "CALIBRATION_SCHEMA_VERSION",
     "VALIDATION_SCHEMA_VERSION",
@@ -46,6 +69,23 @@ __all__ = [
     "predict",
     "summarize_validation_results",
     "validate_prediction",
+    "KNOWN_METRICS",
+    "REGRESSION_POLICY_SCHEMA_VERSION",
+    "REGRESSION_RESULT_SCHEMA_VERSION",
+    "STATUS_ERROR",
+    "STATUS_FAIL",
+    "STATUS_NOT_COMPARABLE",
+    "STATUS_PASS",
+    "MetricComparison",
+    "MetricPolicy",
+    "RegressionPolicy",
+    "RegressionResult",
+    "RegressionSuiteResult",
+    "compare_benchmark_results",
+    "compare_regression_suite",
+    "load_regression_policy",
+    "regression_policy_from_dict",
+    "render_markdown_report",
 ]
 
 # tracking.py imports mlflow, an optional "ops" extra -- benchmark.py/

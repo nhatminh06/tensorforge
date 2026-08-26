@@ -10,11 +10,12 @@ candidates) rather than exposing every raw Core CLI flag.
 import argparse
 import json
 import os
+import sys
 
 from tensorforge.experiments import ExperimentSpec, run_experiment
 from tensorforge.presets import get_workload_preset
 
-from tensorforge_ops.benchmark import BenchmarkConfig
+from tensorforge_ops.benchmark import BenchmarkConfig, load_benchmark_result
 from tensorforge_ops.calibration import (
     CalibrationConfig,
     calibration_profile_from_dict,
@@ -22,6 +23,14 @@ from tensorforge_ops.calibration import (
     predict,
     summarize_validation_results,
     validate_prediction,
+)
+from tensorforge_ops.regression import (
+    STATUS_ERROR,
+    STATUS_FAIL,
+    STATUS_NOT_COMPARABLE,
+    compare_benchmark_results,
+    load_regression_policy,
+    render_markdown_report,
 )
 from tensorforge_ops.tracking import (
     DEFAULT_EXPERIMENT_NAME,
@@ -99,6 +108,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-track", action="store_true",
         help="Run the benchmark without logging to MLflow (prints the summary only).",
     )
+    bench.add_argument("--output-json", default=None, help="Path to save the BenchmarkResult JSON.")
+    bench.add_argument("--force", action="store_true", help="Overwrite --output-json if it already exists.")
 
     calibrate = sub.add_parser(
         "calibrate",
@@ -168,6 +179,19 @@ def _build_parser() -> argparse.ArgumentParser:
     validate_suite.add_argument("--output", default=None, help="Path to save the validation-summary JSON.")
     validate_suite.add_argument(
         "--force", action="store_true", help="Overwrite --output if it already exists.",
+    )
+
+    regression = sub.add_parser(
+        "regression",
+        help="Compare a baseline and candidate BenchmarkResult against an explicit regression policy.",
+    )
+    regression.add_argument("--baseline", required=True, help="Path to the baseline BenchmarkResult JSON.")
+    regression.add_argument("--candidate", required=True, help="Path to the candidate BenchmarkResult JSON.")
+    regression.add_argument("--policy", required=True, help="Path to a RegressionPolicy JSON.")
+    regression.add_argument("--output-json", default=None, help="Path to save the RegressionResult JSON.")
+    regression.add_argument("--output-markdown", default=None, help="Path to save the Markdown report.")
+    regression.add_argument(
+        "--force", action="store_true", help="Overwrite --output-json/--output-markdown if they already exist.",
     )
 
     return parser
@@ -293,6 +317,9 @@ def _run_benchmark(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     if tracking is not None and tracked is not None:
         log_benchmark_result(tracking, tracked.run_id, benchmark_result)
 
+    if args.output_json is not None:
+        _write_output_file(parser, args.output_json, benchmark_result.to_json(), args.force)
+
     stats = benchmark_result.statistics
     print("TensorForge Benchmark")
     print()
@@ -324,6 +351,10 @@ def _run_benchmark(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         print(f"  peak allocated             {benchmark_result.peak_memory_allocated_bytes:,} bytes")
     else:
         print("  peak allocated             n/a (not available for this device)")
+
+    if args.output_json is not None:
+        print()
+        print(f"Saved to {args.output_json}")
 
     if tracked is not None:
         print()
@@ -604,7 +635,89 @@ def _run_validate_suite(parser: argparse.ArgumentParser, args: argparse.Namespac
         print(f"  summary run id             {run_id}")
 
 
-def main(argv: list[str] | None = None) -> None:
+def _format_metric_for_cli(metric: str, value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    if metric.endswith("_latency_seconds"):
+        return _format_seconds(value)
+    if metric == "peak_memory_allocated_bytes":
+        return f"{value / (1024 * 1024):.1f} MiB"
+    if metric == "throughput_per_second":
+        return f"{value:.1f}/s"
+    return str(value)
+
+
+def _run_regression(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Exit-code contract (checked by tests, relied on by CI):
+        0 -> guard passed (RegressionResult.status == PASS)
+        1 -> operational/configuration/comparison error (bad input files,
+             incompatible schema, mismatched workload/device/backend/dtype)
+        2 -> valid comparison, but the regression policy failed
+    This lets CI distinguish "the code got slower" from "the benchmark
+    infrastructure is broken" -- the two must never be conflated.
+    """
+    try:
+        baseline = load_benchmark_result(args.baseline)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"error: could not load --baseline {args.baseline!r}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        candidate = load_benchmark_result(args.candidate)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"error: could not load --candidate {args.candidate!r}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        policy = load_regression_policy(args.policy)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"error: could not load --policy {args.policy!r}: {exc}", file=sys.stderr)
+        return 1
+
+    result = compare_benchmark_results(baseline, candidate, policy)
+    report = render_markdown_report(result)
+
+    # Deliberately NOT _write_output_file()/parser.error() here: argparse
+    # always exits 2, which would collide with this command's own "2 ==
+    # regression FAIL" convention. An overwrite-protection violation is an
+    # operational error (exit 1), never a regression failure (exit 2).
+    for path, text in ((args.output_json, result.to_json()), (args.output_markdown, report)):
+        if path is None:
+            continue
+        if os.path.exists(path) and not args.force:
+            print(f"error: {path} already exists; pass --force to overwrite", file=sys.stderr)
+            return 1
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    print("TensorForge Performance Regression Guard")
+    print()
+
+    if result.status == STATUS_ERROR:
+        print("Result: ERROR")
+        print()
+        print(result.error_message)
+        return 1
+
+    print(f"Workload: {result.workload_preset}")
+    print()
+    print(f"Result: {result.status}")
+    print()
+    for c in result.metric_comparisons:
+        if c.status == STATUS_NOT_COMPARABLE:
+            continue
+        base = _format_metric_for_cli(c.metric, c.baseline_value)
+        candidate_str = _format_metric_for_cli(c.metric, c.candidate_value)
+        change = f"{c.relative_delta * 100:+.1f}%" if c.relative_delta is not None else "n/a"
+        print(f"{c.metric}:")
+        print(f"  {base} -> {candidate_str} ({change})  [{c.status}]")
+    print()
+
+    if args.output_markdown is not None:
+        print(f"Report: {args.output_markdown}")
+
+    return 2 if result.status == STATUS_FAIL else 0
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -620,7 +733,10 @@ def main(argv: list[str] | None = None) -> None:
         _run_validate(parser, args)
     elif args.command == "validate-suite":
         _run_validate_suite(parser, args)
+    elif args.command == "regression":
+        return _run_regression(parser, args)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
