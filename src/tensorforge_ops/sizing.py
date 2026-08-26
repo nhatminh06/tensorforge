@@ -376,6 +376,31 @@ class CandidatePlan:
         }
 
 
+def candidate_plan_from_dict(d: dict) -> CandidatePlan:
+    def _decimal_or_none(value):
+        return Decimal(str(value)) if value is not None else None
+
+    return CandidatePlan(
+        candidate_id=d["candidate_id"], status=d["status"], reasons=tuple(d["reasons"]),
+        device=d["device"], backend=d["backend"], dtype=d["dtype"], runtime_metadata=dict(d["runtime_metadata"]),
+        measured_p95_latency_seconds=d["measured_p95_latency_seconds"],
+        measured_capacity_per_replica=d["measured_capacity_per_replica"],
+        capacity_headroom_fraction=d["capacity_headroom_fraction"],
+        usable_capacity_per_replica=d["usable_capacity_per_replica"],
+        required_replicas=d["required_replicas"], total_measured_capacity=d["total_measured_capacity"],
+        total_usable_capacity=d["total_usable_capacity"], spare_usable_capacity=d["spare_usable_capacity"],
+        planned_utilization_fraction=d["planned_utilization_fraction"],
+        hourly_cost_per_replica=Decimal(str(d["hourly_cost_per_replica"])),
+        total_hourly_cost=_decimal_or_none(d["total_hourly_cost"]),
+        monthly_cost=_decimal_or_none(d["monthly_cost"]),
+        cost_per_million_required_invocations=_decimal_or_none(d["cost_per_million_required_invocations"]),
+        peak_memory_allocated_bytes=d["peak_memory_allocated_bytes"],
+        provider=d["provider"], region=d["region"], hardware_label=d["hardware_label"],
+        price_source=d["price_source"], price_as_of=d["price_as_of"],
+        telemetry_context=d["telemetry_context"], validation_context=d["validation_context"],
+    )
+
+
 def _evaluate_candidate(candidate: DeploymentCandidate, slo: SloPolicy) -> CandidatePlan:
     benchmark = candidate.benchmark_result
     stats = benchmark.statistics
@@ -529,6 +554,32 @@ class SizingPlanResult:
         import json
 
         return json.dumps(self.to_dict(), sort_keys=True, indent=indent)
+
+
+def sizing_plan_result_from_dict(d: dict) -> SizingPlanResult:
+    workload = d["workload"]
+    slo = d["slo"]
+    return SizingPlanResult(
+        status=d["status"], error_message=d["error_message"],
+        workload_preset=workload["preset"], workload_kind=workload["kind"],
+        backend=d["backend"], dtype=d["dtype"], currency=d["currency"],
+        required_invocations_per_second=slo["required_invocations_per_second"],
+        max_p95_latency_seconds=slo["max_p95_latency_seconds"],
+        capacity_headroom_fraction=slo["capacity_headroom_fraction"],
+        monthly_hours=slo["monthly_hours"],
+        candidate_plans=tuple(candidate_plan_from_dict(c) for c in d["candidate_plans"]),
+        feasible_candidate_count=d["feasible_candidate_count"],
+        ranking=tuple(d["ranking"]), recommended_candidate_id=d["recommended_candidate_id"],
+        assumptions=tuple(d["assumptions"]),
+        sizing_result_schema_version=d.get("sizing_result_schema_version", SIZING_RESULT_SCHEMA_VERSION),
+    )
+
+
+def load_sizing_plan_result(path: str) -> SizingPlanResult:
+    import json
+
+    with open(path, encoding="utf-8") as f:
+        return sizing_plan_result_from_dict(json.load(f))
 
 
 def _error_plan(message: str, catalog: DeploymentCatalog | None = None) -> SizingPlanResult:

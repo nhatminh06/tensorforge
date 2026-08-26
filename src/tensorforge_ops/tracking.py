@@ -52,6 +52,7 @@ from tensorforge_ops.calibration import (
     compute_calibration_fingerprint,
 )
 from tensorforge_ops.sizing import SizingPlanResult
+from tensorforge_ops.impact import ImpactResult
 
 DEFAULT_EXPERIMENT_NAME = "tensorforge"
 
@@ -612,6 +613,58 @@ def log_sizing_plan(
         _log_text_artifact(plan.to_json(), "sizing-result.json")
         if report_markdown is not None:
             _log_text_artifact(report_markdown, "sizing-report.md")
+
+        run_id = run.info.run_id
+
+    return run_id
+
+
+def log_impact_result(
+    tracking: TrackingConfig,
+    result: ImpactResult,
+    report_markdown: str | None = None,
+    run_name: str | None = None,
+) -> str:
+    """Log an ImpactResult (Milestone 17) as its own new MLflow run -- a
+    derived composition artifact spanning multiple domains (regression,
+    sizing, telemetry, validation, Core), so it does not belong to any
+    single existing run. Never duplicates or mutates
+    core-result.json/benchmark-result.json/regression-result.json/
+    sizing-result.json/telemetry-summary.json/validation-result.json on
+    any other run -- those remain authoritative in their own domains.
+    Returns the created run_id.
+    """
+    mlflow.set_tracking_uri(tracking.tracking_uri)
+    mlflow.set_experiment(tracking.experiment_name)
+
+    with mlflow.start_run(run_name=run_name or "impact-report") as run:
+        di = result.deployment_impact
+        metrics = {}
+        if di.hourly_cost_absolute_delta is not None:
+            metrics["impact_hourly_cost_absolute_change"] = float(di.hourly_cost_absolute_delta)
+        if di.hourly_cost_relative_delta is not None:
+            metrics["impact_hourly_cost_relative_change"] = di.hourly_cost_relative_delta
+        if di.monthly_cost_absolute_delta is not None:
+            metrics["impact_monthly_cost_absolute_change"] = float(di.monthly_cost_absolute_delta)
+        if di.monthly_cost_relative_delta is not None:
+            metrics["impact_monthly_cost_relative_change"] = di.monthly_cost_relative_delta
+        if di.replica_delta is not None:
+            metrics["impact_replica_change"] = di.replica_delta
+        mlflow.log_metrics(metrics)
+
+        tags = {
+            "tensorforge.impact": "model-change",
+            "tensorforge.impact_result_schema_version": str(result.impact_result_schema_version),
+            "tensorforge.impact_readiness": result.readiness,
+            "tensorforge.performance_regression_status": result.regression_status,
+        }
+        if di.candidate_deployment_feasible is not None:
+            tags["tensorforge.deployment_status"] = "feasible" if di.candidate_deployment_feasible else "infeasible"
+        mlflow.set_tags(tags)
+
+        _log_text_artifact(result.to_json(), "impact-result.json")
+        if report_markdown is not None:
+            _log_text_artifact(report_markdown, "impact-report.md")
 
         run_id = run.info.run_id
 

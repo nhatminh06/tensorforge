@@ -17,6 +17,7 @@ from tensorforge_ops.regression import (
     compare_benchmark_results,
     compare_regression_suite,
     regression_policy_from_dict,
+    regression_result_from_dict,
     render_markdown_report,
 )
 
@@ -327,3 +328,22 @@ def test_suite_overall_error_precedence_over_fail():
 def test_suite_rejects_empty_pairs():
     with pytest.raises(ValueError):
         compare_regression_suite([], latency_policy())
+
+
+# --- regression_result_from_dict roundtrip (added for Milestone 17 impact reporting) ---
+
+def test_regression_result_from_dict_roundtrip_pass():
+    baseline = make_benchmark(p50=0.100)
+    candidate = make_benchmark(p50=0.103)
+    result = compare_benchmark_results(baseline, candidate, latency_policy(relative=0.10))
+    restored = regression_result_from_dict(json.loads(result.to_json()))
+    assert restored.to_json() == result.to_json()
+
+
+def test_regression_result_from_dict_roundtrip_error():
+    baseline = make_benchmark(p50=0.001, preset="gemm_tiny")
+    candidate = make_benchmark(p50=0.001, preset="conv_spatial", kind="conv2d")
+    result = compare_benchmark_results(baseline, candidate, latency_policy())
+    assert result.status == STATUS_ERROR
+    restored = regression_result_from_dict(json.loads(result.to_json()))
+    assert restored.to_json() == result.to_json()

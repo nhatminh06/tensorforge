@@ -81,8 +81,18 @@ its full test suite with no MLflow installed at all.
   model, and TelemetrySummary/ValidationResult attach only as
   diagnostic context that never changes feasibility or ranking — see
   [right-sizing.md](right-sizing.md). No cloud prices are hard-coded or
-  fetched; pricing is entirely user-supplied. This does not add a
-  model-change impact report (a later milestone).
+  fetched; pricing is entirely user-supplied.
+- **Milestone 17 (final)** added a **model-change impact report**
+  (`tensorforge_ops.impact`): a pure, deterministic composition of
+  already-computed evidence -- `RegressionResult` (Milestone 14) and
+  `SizingPlanResult` (Milestone 16) drive an explicit `ImpactPolicy` into
+  one of `PERFORMANCE_READY` / `PERFORMANCE_BLOCKED` / `REVIEW_REQUIRED`;
+  Core, `ValidationResult` (Milestone 13), and `TelemetrySummary`
+  (Milestone 15) attach only as non-gating context. There is no composite
+  score, and the recommendation covers measured performance and
+  deployment/infrastructure readiness only -- never model quality,
+  correctness, or business value. See
+  [model-change-impact.md](model-change-impact.md).
 
 ## Package layout
 
@@ -111,9 +121,12 @@ src/tensorforge_ops/
                             imports pynvml (nvidia-ml-py), imported lazily by the CLI
     sizing.py                DeploymentCandidate, DeploymentCatalog, SloPolicy,
                             build_sizing_plan() (no torch/NVML/MLflow dependency)
+    impact.py                ImpactManifest, ImpactPolicy, build_impact_result(),
+                            render_impact_markdown_report() (no torch/NVML dependency;
+                            composes existing artifacts, never re-runs anything)
     cli.py                 python -m tensorforge_ops track / list-runs / benchmark /
                             calibrate / validate / validate-suite / regression / telemetry /
-                            right-size
+                            right-size / impact
     __main__.py
 ```
 
@@ -241,24 +254,50 @@ fetched or hard-coded. See [right-sizing.md](right-sizing.md) for the
 full methodology and a live demo combining real RTX 3050 evidence with
 labeled synthetic peers.
 
-## Current end-to-end flow
+## Model-change impact report (Milestone 17, final)
+
+```bash
+python -m tensorforge_ops impact \
+    --manifest impact-manifest.json --policy impact-policy.json \
+    --output-json impact-result.json --output-markdown impact-report.md
+```
+
+Composes an already-produced `RegressionResult` and (optionally)
+baseline/candidate `SizingPlanResult`/`ValidationResult`/
+`TelemetrySummary`/Core result evidence into one report: what changed
+(analytical), what was measured (regression), what it costs (deployment
+sizing), what GPU telemetry suggests (context), and what evidence is
+missing. Exits `0` (`PERFORMANCE_READY`), `1` (`REVIEW_REQUIRED` or an
+operational error), or `2` (`PERFORMANCE_BLOCKED`). See
+[model-change-impact.md](model-change-impact.md) for the full decision
+precedence and a live demo on real RTX 3050 evidence.
+
+## Current evidence flow
+
+These are independent evidence-producing stages, not one mandatory
+sequential runtime -- `impact` only requires a `RegressionResult`; every
+other input is optional context.
 
 ```
 Core analytical result
       |
    MLflow (Milestone 11)
       |
-real benchmark (Milestone 12)
-      |
-device calibration (Milestone 13)
-      |
-prediction-vs-measurement validation (Milestone 13)
-      |
-PR performance regression guard (Milestone 14)
-      |
-GPU telemetry correlation (Milestone 15)
-      |
-hardware right-sizing / SLO-cost planning (Milestone 16)
+      +-- real benchmark (Milestone 12) ------------------+
+      |         |                                          |
+      |   device calibration (Milestone 13)                |
+      |         |                                          |
+      |   prediction-vs-measurement validation (M13)       |
+      |                                                     |
+      +-- PR performance regression guard (Milestone 14) --+
+      |                                                     |
+      +-- GPU telemetry correlation (Milestone 15)          |
+      |                                                     |
+      +-- hardware right-sizing / SLO-cost planning (M16)   |
+      |                                                     |
+      +----------------> model-change impact report (M17) <-+
 ```
 
-A model-change impact report is a future milestone, not yet implemented.
+`impact` (Milestone 17) is the final milestone: it composes the evidence
+above into one performance-and-infrastructure readiness report. It does
+not evaluate model quality or correctness.

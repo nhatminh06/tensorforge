@@ -82,3 +82,28 @@ marketing summary.
 - No area model.
 - Not validated against real hardware; not cycle-accurate; results are
   "modeled" or "analytical," never "measured" or "benchmarked."
+
+### TensorForge Ops (Phase 2)
+
+This project's Core limitations above apply unchanged inside Ops
+(a `BenchmarkResult`/`SizingPlanResult`/etc. still wraps a Core
+experiment with all the modeling limits listed above). Ops adds its own,
+documented per-milestone in `docs/ops/`:
+
+- Real benchmarking measures steady-state single-stream latency on one
+  process/device -- no production request queue, no dynamic batching, no
+  autoscaler dynamics ([benchmarking.md](ops/benchmarking.md)).
+- Calibration/validation is empirical against one live device's own
+  measured compute/memory probes -- never a mapping of physical GPU
+  cores onto TensorForge PEs, and not accurate for every workload shape
+  ([calibration.md](ops/calibration.md), [validation.md](ops/validation.md)).
+- GPU telemetry is coarse NVML sampling, evidence-worded, and never
+  proves a root cause on its own ([gpu-telemetry.md](ops/gpu-telemetry.md)).
+- Right-sizing and cost planning use entirely user-supplied prices --
+  no live cloud pricing/FX, no deployment automation, no queueing model
+  ([right-sizing.md](ops/right-sizing.md)).
+- The model-change impact report composes the evidence above into a
+  performance-and-infrastructure readiness recommendation only -- no
+  composite score, no model-quality/correctness/business-value claim,
+  and only one physical GPU has ever produced real evidence for this
+  project ([model-change-impact.md](ops/model-change-impact.md)).

@@ -26,6 +26,7 @@ from tensorforge_ops.sizing import (
     load_deployment_catalog,
     load_slo_policy,
     render_sizing_markdown_report,
+    sizing_plan_result_from_dict,
 )
 
 
@@ -531,3 +532,21 @@ def test_load_slo_policy_from_file(tmp_path):
     slo = load_slo_policy(str(slo_path))
     assert slo.required_invocations_per_second == 120.0
     assert slo.capacity_headroom_fraction == 0.2
+
+
+# --- sizing_plan_result_from_dict roundtrip (added for Milestone 17 impact reporting) ---
+
+def test_sizing_plan_result_from_dict_roundtrip():
+    candidate = make_candidate("gpu", "0.45", throughput=90.0, p95=0.015)
+    plan = build_sizing_plan(make_catalog(candidate), default_slo(max_p95_latency_seconds=0.025))
+    restored = sizing_plan_result_from_dict(json.loads(plan.to_json()))
+    assert restored.to_json() == plan.to_json()
+
+
+def test_sizing_plan_result_from_dict_roundtrip_error_status():
+    a = make_candidate("a", 1, preset="gemm_large_square", kind="gemm")
+    b = make_candidate("b", 1, preset="conv_spatial", kind="conv2d")
+    plan = build_sizing_plan(make_catalog(a, b), default_slo())
+    assert plan.status == PLAN_STATUS_ERROR
+    restored = sizing_plan_result_from_dict(json.loads(plan.to_json()))
+    assert restored.to_json() == plan.to_json()
