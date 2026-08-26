@@ -15,8 +15,23 @@ from tensorforge.roofline import compute_roofline
 from tensorforge.tiling import GemmSchedule, GemmTile, analyze_tiling, compare_schedules
 from tensorforge.timing import TimingConfig, estimate_execution_time
 from tensorforge.explore import explore
+from tensorforge.transformer import (
+    TransformerBlockSpec,
+    evaluate_transformer_block,
+    explore_transformer_architectures,
+)
 
 _DTYPE_CHOICES = {"fp32": DType.FP32, "fp16": DType.FP16, "int8": DType.INT8}
+_OP_DISPLAY_NAMES = {
+    "q_projection": "Q projection",
+    "k_projection": "K projection",
+    "v_projection": "V projection",
+    "attention_scores": "Attention scores",
+    "attention_value": "Attention value",
+    "output_projection": "Output projection",
+    "mlp_up": "MLP up",
+    "mlp_down": "MLP down",
+}
 _SCHEDULE_CHOICES = {
     "c-resident": GemmSchedule.C_RESIDENT,
     "a-resident": GemmSchedule.A_RESIDENT,
@@ -59,9 +74,9 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="tensorforge",
         description="Analytical GEMM + roofline modeling.",
     )
-    parser.add_argument("--m", type=int, required=True)
-    parser.add_argument("--n", type=int, required=True)
-    parser.add_argument("--k", type=int, required=True)
+    parser.add_argument("--m", type=int, default=None)
+    parser.add_argument("--n", type=int, default=None)
+    parser.add_argument("--k", type=int, default=None)
     parser.add_argument("--dtype", choices=sorted(_DTYPE_CHOICES), default="fp32")
     parser.add_argument(
         "--peak-tflops",
@@ -107,6 +122,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated schedule names (default: all three, c-resident,a-resident,b-resident)",
     )
     parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--transformer-block", action="store_true")
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--seq-len", type=int, default=None)
+    parser.add_argument("--d-model", type=int, default=None)
+    parser.add_argument("--num-heads", type=int, default=None)
+    parser.add_argument("--d-ff", type=int, default=None)
+    parser.add_argument("--explore-pe", action="store_true")
     return parser
 
 
@@ -254,6 +276,150 @@ def _run_explore(parser: argparse.ArgumentParser, args, gemm: Gemm, hardware: Ha
             print(f"  - {line}")
 
 
+def _print_block_header(spec: TransformerBlockSpec, hierarchy, hardware, args, pe_array) -> None:
+    print("Transformer GEMM block (GEMM-only estimate, not complete Transformer latency)")
+    print()
+    print("Block")
+    print(f"  batch                    {spec.batch_size}")
+    print(f"  sequence length          {spec.sequence_length}")
+    print(f"  d_model                  {spec.d_model}")
+    print(f"  heads                    {spec.num_heads}")
+    print(f"  head_dim                 {spec.head_dim}")
+    print(f"  d_ff                     {spec.d_ff}")
+    print()
+    print("Hardware")
+    print(f"  PE array                 {pe_array.rows} x {pe_array.columns}")
+    print(f"  SRAM                     {_format_bytes(hierarchy.sram_bytes)}")
+    print(f"  clock                    {args.clock_ghz:.2f} GHz")
+    print(f"  DRAM bandwidth           {args.bandwidth_gbps:.2f} GB/s")
+
+
+def _print_block_operations(block_result) -> None:
+    print()
+    print("Modeled GEMMs")
+    for r in block_result.operation_results:
+        c, t = r.mapping.candidate, r.mapping.timing_result
+        print()
+        print(_OP_DISPLAY_NAMES.get(r.name, r.name))
+        print(f"  shape                    {r.gemm.m} x {r.gemm.n} x {r.gemm.k}")
+        print(f"  repetitions              {r.repetitions}")
+        print(f"  selected tile            {c.tile_m} x {c.tile_n} x {c.tile_k}")
+        print(f"  schedule                 {c.schedule.value}")
+        print(f"  per-execution time       {_format_seconds(t.perfect_overlap_time_seconds)}")
+        if r.repetitions > 1:
+            print(
+                f"  aggregate time           {_format_seconds(r.aggregate_perfect_overlap_time_seconds)}"
+            )
+
+
+def _print_block_totals(block_result) -> None:
+    print()
+    print("Block totals (GEMM-only)")
+    print(f"  modeled GEMM MACs        {block_result.total_macs:,}")
+    print(f"  modeled GEMM FLOPs       {block_result.total_flops:,}")
+    print(f"  modeled DRAM traffic     {_format_bytes(block_result.total_dram_bytes)}")
+    print(f"  perfect-overlap time     {_format_seconds(block_result.perfect_overlap_time_seconds)}")
+    print(f"  serialized time          {_format_seconds(block_result.serialized_time_seconds)}")
+    print()
+    print(f"Largest modeled GEMM time contributor: {_OP_DISPLAY_NAMES.get(block_result.largest_time_contributor, block_result.largest_time_contributor)}")
+    print(f"Largest modeled DRAM contributor: {_OP_DISPLAY_NAMES.get(block_result.largest_dram_contributor, block_result.largest_dram_contributor)}")
+    print()
+    print("Unmodeled (excluded, not zero-cost):")
+    for name in block_result.unmodeled_operations:
+        print(f"  - {name}")
+
+
+def _run_transformer_block(parser: argparse.ArgumentParser, args, hardware: HardwareConfig) -> None:
+    tile_m_values = _parse_int_list(parser, "--tile-m-values", args.tile_m_values)
+    tile_n_values = _parse_int_list(parser, "--tile-n-values", args.tile_n_values)
+    tile_k_values = _parse_int_list(parser, "--tile-k-values", args.tile_k_values)
+
+    schedules = None
+    if args.schedule_values is not None:
+        schedules = []
+        for name in args.schedule_values.split(","):
+            name = name.strip()
+            if name not in _SCHEDULE_CHOICES:
+                parser.error(f"--schedule-values: unknown schedule {name!r}")
+            schedules.append(_SCHEDULE_CHOICES[name])
+
+    try:
+        spec = TransformerBlockSpec(
+            batch_size=args.batch_size,
+            sequence_length=args.seq_len,
+            d_model=args.d_model,
+            num_heads=args.num_heads,
+            d_ff=args.d_ff,
+            dtype=_DTYPE_CHOICES[args.dtype],
+        )
+        sram_bytes = round(args.sram_kib * _KIB)
+        hierarchy = MemoryHierarchy(sram_bytes=sram_bytes)
+        timing_config = TimingConfig(clock_hz=args.clock_ghz * 1e9)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    if args.explore_pe:
+        pe_row_values = _parse_int_list(parser, "--pe-row-values", args.pe_row_values)
+        pe_col_values = _parse_int_list(parser, "--pe-col-values", args.pe_col_values)
+
+        try:
+            arch_result = explore_transformer_architectures(
+                spec, hierarchy, hardware, timing_config,
+                tile_m_values=tile_m_values, tile_n_values=tile_n_values, tile_k_values=tile_k_values,
+                pe_rows_values=pe_row_values, pe_cols_values=pe_col_values,
+                schedules=schedules, top_k=args.top_k,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+
+        print("Transformer block architecture exploration (GEMM-only estimate)")
+        print()
+        print(f"Architectures evaluated: {arch_result.total_architectures}")
+        print(f"Feasible: {arch_result.feasible_architectures}")
+
+        if arch_result.feasible_architectures == 0:
+            print()
+            print("No feasible PE architectures: some operation had no feasible tile mapping.")
+            return
+
+        top = arch_result.ranked[: arch_result.top_k]
+        print()
+        print(f"Top {len(top)} configurations (of {arch_result.feasible_architectures} feasible)")
+        for i, a in enumerate(top, start=1):
+            br = a.block_result
+            print()
+            print(f"#{i}")
+            print(f"  PE array                 {a.pe_rows} x {a.pe_cols}")
+            print(f"  PE count                 {a.pe_count:,}")
+            print(f"  block perfect-overlap    {_format_seconds(br.perfect_overlap_time_seconds)}")
+            print(f"  block serialized         {_format_seconds(br.serialized_time_seconds)}")
+            print(f"  block DRAM traffic       {_format_bytes(br.total_dram_bytes)}")
+            print(
+                f"  largest contributor      {_OP_DISPLAY_NAMES.get(br.largest_time_contributor, br.largest_time_contributor)}"
+            )
+
+        best = arch_result.ranked[0]
+        print()
+        print(f"Best among searched PE architectures: {best.pe_rows} x {best.pe_cols}")
+        print()
+        _print_block_operations(best.block_result)
+        _print_block_totals(best.block_result)
+    else:
+        pe_array = PeArray(rows=args.pe_rows, columns=args.pe_cols)
+        try:
+            block_result = evaluate_transformer_block(
+                spec, pe_array, hierarchy, hardware, timing_config,
+                tile_m_values=tile_m_values, tile_n_values=tile_n_values, tile_k_values=tile_k_values,
+                schedules=schedules,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+
+        _print_block_header(spec, hierarchy, hardware, args, pe_array)
+        _print_block_operations(block_result)
+        _print_block_totals(block_result)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -275,7 +441,7 @@ def main(argv: list[str] | None = None) -> None:
                 "--tile-k, and --sram-kib"
             )
 
-    if args.clock_ghz is not None and not args.explore:
+    if args.clock_ghz is not None and not args.explore and not args.transformer_block:
         if args.pe_rows is None or any(t is None for t in tile_args) or args.sram_kib is None:
             parser.error(
                 "--clock-ghz requires --pe-rows/--pe-cols, --tile-m/--tile-n/--tile-k, "
@@ -311,6 +477,67 @@ def main(argv: list[str] | None = None) -> None:
         missing = [flag for flag, value in required_value_flags if value is None]
         if missing:
             parser.error(f"--explore requires {', '.join(missing)}")
+
+    if args.transformer_block:
+        conflicting = (
+            ("--m/--n/--k", any(v is not None for v in (args.m, args.n, args.k))),
+            ("--tile-m/--tile-n/--tile-k", any(t is not None for t in tile_args)),
+            ("--schedule", args.schedule is not None),
+            ("--compare-schedules", args.compare_schedules),
+            ("--explore", args.explore),
+        )
+        conflicts = [name for name, present in conflicting if present]
+        if conflicts:
+            parser.error(f"--transformer-block cannot be combined with {', '.join(conflicts)}")
+
+        block_dims = (
+            ("--batch-size", args.batch_size),
+            ("--seq-len", args.seq_len),
+            ("--d-model", args.d_model),
+            ("--num-heads", args.num_heads),
+            ("--d-ff", args.d_ff),
+        )
+        missing_dims = [flag for flag, value in block_dims if value is None]
+        if missing_dims:
+            parser.error(f"--transformer-block requires {', '.join(missing_dims)}")
+
+        if args.sram_kib is None or args.clock_ghz is None:
+            parser.error("--transformer-block requires --sram-kib and --clock-ghz")
+        if any(v is None for v in (args.tile_m_values, args.tile_n_values, args.tile_k_values)):
+            parser.error(
+                "--transformer-block requires --tile-m-values, --tile-n-values, "
+                "and --tile-k-values"
+            )
+
+        if args.explore_pe:
+            if args.pe_rows is not None or args.pe_cols is not None:
+                parser.error("--explore-pe cannot be combined with --pe-rows/--pe-cols "
+                             "(use --pe-row-values/--pe-col-values instead)")
+            if args.pe_row_values is None or args.pe_col_values is None:
+                parser.error("--explore-pe requires --pe-row-values and --pe-col-values")
+        else:
+            if args.pe_rows is None or args.pe_cols is None:
+                parser.error(
+                    "--transformer-block requires --pe-rows/--pe-cols (fixed architecture), "
+                    "or --explore-pe with --pe-row-values/--pe-col-values"
+                )
+            if args.pe_row_values is not None or args.pe_col_values is not None:
+                parser.error("--pe-row-values/--pe-col-values require --explore-pe")
+
+    elif args.explore_pe:
+        parser.error("--explore-pe requires --transformer-block")
+
+    if args.transformer_block:
+        hardware = HardwareConfig(
+            peak_compute_flops_per_second=args.peak_tflops * 1e12,
+            memory_bandwidth_bytes_per_second=args.bandwidth_gbps * 1e9,
+            name=args.name,
+        )
+        _run_transformer_block(parser, args, hardware)
+        return
+
+    if args.m is None or args.n is None or args.k is None:
+        parser.error("--m, --n, and --k are required (unless using --transformer-block)")
 
     gemm = Gemm(m=args.m, n=args.n, k=args.k, dtype=_DTYPE_CHOICES[args.dtype])
     hardware = HardwareConfig(
