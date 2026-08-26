@@ -37,6 +37,13 @@ from mlflow.tracking import MlflowClient
 from tensorforge.experiments import SCHEMA_VERSION, ExperimentResult, ExperimentSpec, run_experiment
 
 from tensorforge_ops.benchmark import BENCHMARK_SCHEMA_VERSION, BenchmarkResult
+from tensorforge_ops.calibration import (
+    VALIDATION_SCHEMA_VERSION,
+    DeviceCalibrationProfile,
+    ValidationResult,
+    ValidationSummary,
+    compute_calibration_fingerprint,
+)
 
 DEFAULT_EXPERIMENT_NAME = "tensorforge"
 
@@ -326,6 +333,139 @@ def log_benchmark_result(tracking: TrackingConfig, run_id: str, benchmark: Bench
         with open(path, "w", encoding="utf-8") as f:
             f.write(benchmark.to_json())
         client.log_artifact(run_id, path)
+
+
+def _build_calibration_params(profile: DeviceCalibrationProfile) -> dict:
+    params = {
+        "calibration_backend": profile.backend,
+        "calibration_device_type": profile.device_type,
+        "calibration_dtype": profile.dtype,
+        "calibration_compute_probe_shape": (
+            f"{profile.compute_probe.shape_m}x{profile.compute_probe.shape_n}x{profile.compute_probe.shape_k}"
+        ),
+        "calibration_memory_probe_payload_bytes": profile.memory_probe.payload_bytes,
+    }
+    for key, value in profile.runtime_metadata.items():
+        params[f"calibration_runtime_{key}"] = value
+    for key, value in profile.device_metadata.items():
+        params[f"calibration_device_{key}"] = value
+    return params
+
+
+def _build_calibration_metrics(profile: DeviceCalibrationProfile) -> dict:
+    return {
+        "calibration_effective_compute_flops_per_second": profile.effective_compute_flops_per_second,
+        "calibration_effective_memory_bandwidth_bytes_per_second": profile.effective_memory_bandwidth_bytes_per_second,
+    }
+
+
+def log_calibration_profile(tracking: TrackingConfig, run_id: str, profile: DeviceCalibrationProfile) -> str:
+    """Attach a DeviceCalibrationProfile to an existing MLflow run. Returns
+    the calibration fingerprint that was logged, so callers can pass it on
+    to log_validation_result() without recomputing it.
+    """
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    fingerprint = compute_calibration_fingerprint(profile)
+
+    for key, value in _build_calibration_params(profile).items():
+        client.log_param(run_id, key, value)
+    for key, value in _build_calibration_metrics(profile).items():
+        client.log_metric(run_id, key, value)
+
+    tags = {
+        "tensorforge.calibration": "empirical",
+        "tensorforge.calibration_fingerprint": fingerprint,
+        "tensorforge.calibration_schema_version": str(profile.calibration_schema_version),
+        "calibration.device_name": profile.device_name or "",
+        "calibration.dtype": profile.dtype,
+        "calibration.backend": profile.backend,
+    }
+    for key, value in tags.items():
+        client.set_tag(run_id, key, value)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "calibration-profile.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(profile.to_json())
+        client.log_artifact(run_id, path)
+
+    return fingerprint
+
+
+def _build_validation_metrics(validation: ValidationResult) -> dict:
+    return {
+        "calibrated_predicted_compute_seconds": validation.predicted_compute_seconds,
+        "calibrated_predicted_memory_seconds": validation.predicted_memory_seconds,
+        "calibrated_predicted_latency_seconds": validation.predicted_latency_seconds,
+        "validation_signed_error_seconds": validation.signed_error_seconds,
+        "validation_absolute_error_seconds": validation.absolute_error_seconds,
+        "validation_absolute_percentage_error": validation.absolute_percentage_error,
+        "validation_measured_to_predicted_ratio": validation.measured_to_predicted_ratio,
+    }
+
+
+def log_validation_result(tracking: TrackingConfig, run_id: str, validation: ValidationResult) -> None:
+    """Attach a ValidationResult (predicted vs. measured p50) to an
+    existing MLflow run -- by strong preference the same run already
+    holding the Core, benchmark, and calibration artifacts for this
+    workload. Never overwrites Core's predicted_*/analytical metrics or
+    Milestone-12's measured_* metrics; every key here is prefixed
+    calibrated_predicted_/validation_ to keep the three domains distinct.
+    """
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+
+    for key, value in _build_validation_metrics(validation).items():
+        client.log_metric(run_id, key, value)
+
+    tags = {
+        "tensorforge.validation": "prediction-vs-measurement",
+        "tensorforge.calibration_fingerprint": validation.calibration_fingerprint,
+        "tensorforge.predicted_bottleneck": validation.predicted_bottleneck,
+        "tensorforge.validation_schema_version": str(VALIDATION_SCHEMA_VERSION),
+    }
+    for key, value in tags.items():
+        client.set_tag(run_id, key, value)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "validation-result.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(validation.to_json())
+        client.log_artifact(run_id, path)
+
+
+def log_validation_summary(
+    tracking: TrackingConfig,
+    summary: ValidationSummary,
+    run_name: str | None = None,
+) -> str:
+    """Log a ValidationSummary (across several workloads) as its own new
+    MLflow run -- a rollup, not tied to any single Core/benchmark run.
+    Individual per-workload validation runs remain separate; this does not
+    create nested runs. Returns the created run_id.
+    """
+    mlflow.set_tracking_uri(tracking.tracking_uri)
+    mlflow.set_experiment(tracking.experiment_name)
+
+    with mlflow.start_run(run_name=run_name or "validation-suite-summary") as run:
+        mlflow.log_metrics(
+            {
+                "validation_summary_count": summary.count,
+                "validation_summary_mean_ape": summary.mean_absolute_percentage_error,
+                "validation_summary_median_ape": summary.median_absolute_percentage_error,
+                "validation_summary_max_ape": summary.max_absolute_percentage_error,
+                "validation_summary_median_ratio": summary.median_measured_to_predicted_ratio,
+            }
+        )
+        mlflow.set_tags(
+            {
+                "tensorforge.validation": "prediction-vs-measurement-summary",
+                "tensorforge.validation_schema_version": str(VALIDATION_SCHEMA_VERSION),
+            }
+        )
+        _log_text_artifact(summary.to_json(), "validation-summary.json")
+        run_id = run.info.run_id
+
+    return run_id
 
 
 def list_runs(tracking: TrackingConfig, max_results: int = 20) -> tuple[dict, ...]:

@@ -1106,3 +1106,29 @@ TensorForge Core (`src/tensorforge/`) is frozen as a modeling boundary.
   (e.g. "RTX 4090") unless it is the literal physical machine the
   benchmark ran on; Core's generic accelerator presets are not the
   benchmarking machine.
+- Never map a physical GPU's cores/SMs/Tensor Cores directly onto
+  TensorForge PE rows/columns, and never add a real-GPU accelerator
+  preset built from marketing specifications; physical-device
+  predictions must be built from empirically measured compute/memory
+  ceilings, not an invented PE mapping.
+- Calibration probes (synthetic compute/memory-copy probes) and
+  validation workloads (Core workload presets) are separate sets;
+  never tune an effective calibrated rate to reduce error on a specific
+  validation workload.
+- Measured p50 latency is the primary target for prediction-vs-
+  measurement validation, not p95/mean/min/max.
+- "Predicted bottleneck" (which term of an analytical formula is larger)
+  and "measured bottleneck" (an actual hardware-execution claim) are
+  distinct terms; never claim a measured bottleneck without device
+  telemetry to support it.
+- No fitted correction coefficient, additive overhead term, or
+  workload-specific fudge factor in a calibrated/empirical prediction
+  without an explicit, documented model or validation rationale.
+- A device/runtime/dtype mismatch between a calibration profile and a
+  benchmark result invalidates the comparison -- reject it clearly
+  rather than computing a meaningless error.
+- Large prediction error is a legitimate validation finding to report,
+  not a defect to hide or fit away.
+- Calibration artifacts (`calibration-profile.json`), benchmark
+  artifacts, Core artifacts, and validation artifacts stay separate
+  files/schemas -- never merged into one combined schema.

@@ -9,11 +9,20 @@ from mlflow.tracking import MlflowClient
 
 from tensorforge.experiments import ExperimentSpec, run_experiment
 from tensorforge_ops.benchmark import BenchmarkConfig, BenchmarkResult, compute_latency_statistics
+from tensorforge_ops.calibration import (
+    compute_calibration_fingerprint,
+    predict,
+    summarize_validation_results,
+    validate_prediction,
+)
 from tensorforge_ops.tracking import (
     TrackingConfig,
     compute_result_fingerprint,
     list_runs,
     log_benchmark_result,
+    log_calibration_profile,
+    log_validation_result,
+    log_validation_summary,
     resolve_tracking_uri,
     track_experiment,
     track_result,
@@ -362,6 +371,111 @@ def test_log_benchmark_result_artifact_is_byte_identical_to_benchmark_json(tmp_p
     with open(local_path, encoding="utf-8") as f:
         artifact_text = f.read()
     assert artifact_text == benchmark.to_json()
+
+
+# --- attaching calibration/validation to an already-tracked analytical run ------
+
+def make_calibration_profile(effective_compute=1e9, effective_memory=1e9):
+    from tensorforge_ops.calibration import ComputeProbeResult, DeviceCalibrationProfile, MemoryProbeResult
+
+    compute_probe = ComputeProbeResult(
+        shape_m=8, shape_n=8, shape_k=8, flops=1024,
+        latency_samples_seconds=(0.001,), p50_seconds=0.001,
+        effective_compute_flops_per_second=effective_compute,
+    )
+    memory_probe = MemoryProbeResult(
+        payload_bytes=1024, modeled_copy_traffic_bytes=2048,
+        latency_samples_seconds=(0.001,), p50_seconds=0.001,
+        effective_memory_bandwidth_bytes_per_second=effective_memory,
+    )
+    return DeviceCalibrationProfile(
+        calibration_schema_version=1,
+        backend="pytorch", device_type="cpu", device_index=None, device_name=None,
+        dtype="fp16",
+        runtime_metadata={"torch_version": "2.4.0", "device_type": "cpu"},
+        device_metadata={},
+        compute_probe=compute_probe, memory_probe=memory_probe,
+        effective_compute_flops_per_second=effective_compute,
+        effective_memory_bandwidth_bytes_per_second=effective_memory,
+    )
+
+
+def test_log_calibration_profile_attaches_metrics_and_artifact(tmp_path):
+    tracking = tracking_config(tmp_path)
+    result = run_experiment(make_spec())
+    tracked = track_result(result, tracking)
+
+    profile = make_calibration_profile()
+    fingerprint = log_calibration_profile(tracking, tracked.run_id, profile)
+
+    assert fingerprint == compute_calibration_fingerprint(profile)
+
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    run = client.get_run(tracked.run_id)
+    assert run.data.metrics["calibration_effective_compute_flops_per_second"] == 1e9
+    assert run.data.tags["tensorforge.calibration"] == "empirical"
+    assert run.data.tags["tensorforge.calibration_fingerprint"] == fingerprint
+    # analytical metrics from track_result() are untouched
+    assert "perfect_overlap_time_seconds" in run.data.metrics
+
+    local_path = client.download_artifacts(tracked.run_id, "calibration-profile.json", str(tmp_path))
+    with open(local_path, encoding="utf-8") as f:
+        assert f.read() == profile.to_json()
+
+
+def test_log_validation_result_attaches_metrics_and_artifact(tmp_path):
+    tracking = tracking_config(tmp_path)
+    result = run_experiment(make_spec())
+    tracked = track_result(result, tracking)
+
+    profile = make_calibration_profile()
+    log_calibration_profile(tracking, tracked.run_id, profile)
+
+    benchmark = make_benchmark_result(tracked.result_fingerprint, samples=(0.01, 0.011, 0.009, 0.0105, 0.0095))
+    prediction = predict(get_workload_preset_for_spec(), profile)
+    validation = validate_prediction(profile, prediction, tracked.result_fingerprint, benchmark)
+    log_validation_result(tracking, tracked.run_id, validation)
+
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    run = client.get_run(tracked.run_id)
+    assert run.data.metrics["validation_absolute_percentage_error"] == pytest.approx(validation.absolute_percentage_error)
+    assert run.data.tags["tensorforge.validation"] == "prediction-vs-measurement"
+    assert run.data.tags["tensorforge.predicted_bottleneck"] == validation.predicted_bottleneck
+    # measured_* and predicted_* Core/benchmark metrics remain untouched
+    assert "measured_mean_latency_seconds" not in run.data.metrics  # benchmark metrics were never logged here
+    assert "perfect_overlap_time_seconds" in run.data.metrics
+
+    local_path = client.download_artifacts(tracked.run_id, "validation-result.json", str(tmp_path))
+    with open(local_path, encoding="utf-8") as f:
+        assert f.read() == validation.to_json()
+
+
+def get_workload_preset_for_spec():
+    from tensorforge.presets import get_workload_preset
+
+    return get_workload_preset("gemm_tiny")
+
+
+def test_log_validation_summary_creates_its_own_run(tmp_path):
+    tracking = tracking_config(tmp_path)
+    profile = make_calibration_profile()
+    result = run_experiment(make_spec())
+    fingerprint = compute_result_fingerprint(result)
+    benchmark = make_benchmark_result(fingerprint, samples=(0.01, 0.011, 0.009, 0.0105, 0.0095))
+    prediction = predict(get_workload_preset_for_spec(), profile)
+    validation = validate_prediction(profile, prediction, fingerprint, benchmark)
+    summary = summarize_validation_results((validation,))
+
+    run_id = log_validation_summary(tracking, summary)
+
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    run = client.get_run(run_id)
+    assert run.data.metrics["validation_summary_count"] == 1
+    assert run.data.tags["tensorforge.validation"] == "prediction-vs-measurement-summary"
+
+    local_path = client.download_artifacts(run_id, "validation-summary.json", str(tmp_path))
+    with open(local_path, encoding="utf-8") as f:
+        assert f.read() == summary.to_json()
 
 
 # --- Core boundary: no MLflow import anywhere under src/tensorforge/ --------------
