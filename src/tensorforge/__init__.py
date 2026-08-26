@@ -13,6 +13,17 @@ from tensorforge.tiling import (
 )
 from tensorforge.timing import ExecutionTimingResult, TimingConfig, estimate_execution_time
 from tensorforge.explore import CandidateConfig, CandidateResult, ExplorationResult, explore
+from tensorforge.transformer import (
+    ArchitectureExplorationResult,
+    ArchitectureResult,
+    OperationResult,
+    TransformerBlockResult,
+    TransformerBlockSpec,
+    TransformerGemmOp,
+    derive_transformer_gemms,
+    evaluate_transformer_block,
+    explore_transformer_architectures,
+)
 
 __all__ = [
     "DType",
@@ -39,4 +50,13 @@ __all__ = [
     "CandidateResult",
     "ExplorationResult",
     "explore",
+    "ArchitectureExplorationResult",
+    "ArchitectureResult",
+    "OperationResult",
+    "TransformerBlockResult",
+    "TransformerBlockSpec",
+    "TransformerGemmOp",
+    "derive_transformer_gemms",
+    "evaluate_transformer_block",
+    "explore_transformer_architectures",
 ]

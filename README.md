@@ -6,23 +6,29 @@ capacity. It starts from analytical models and adds architectural detail
 incrementally (PE arrays, memory hierarchy, tiling, dataflows, convolution,
 Transformer operations).
 
-## Current model (Milestone 7)
+## Current model (Milestone 8)
 
 Analytical GEMM + roofline + rectangular PE mapping + SRAM capacity +
 explicit GEMM tiling traffic under three explicit loop-order/residency
 schedules (`c-resident`, `a-resident`, `b-resident`) + analytical
 compute/memory execution timing + a bounded, deterministic design-space
-explorer over user-supplied tile/schedule/PE-array candidates. Tiled DRAM
-traffic is exact only for the specific modeled schedule used; timing is
-an idealized bandwidth-only, no-pipeline analytical estimate; exploration
-results are only the "best among searched candidates," never a global or
-real-hardware optimum. TensorForge is a design-space explorer, not an
-architecture optimizer. There is no continuous/automatic architecture
-search, no systolic timing, and no cycle accuracy. All numbers come from
-closed-form formulas over a `Gemm`, a `HardwareConfig`, an optional
-`PeArray`, an optional `MemoryHierarchy`, an optional `GemmTile` +
-`GemmSchedule`, an optional `TimingConfig`, and an optional bounded
-`explore()` search over these.
+explorer over user-supplied tile/schedule/PE-array candidates + GEMM-only
+Transformer-block workload modeling (Q/K/V/output projections, attention
+scores/value, MLP up/down) with per-operation tile/schedule mapping on
+one shared, fixed PE array, and PE-architecture comparison across the
+whole block. TensorForge can model the GEMM-heavy portion of a
+Transformer block and compare bounded PE-array configurations using
+per-operation tile/schedule exploration — it does **not** simulate
+Transformer inference: softmax, normalization, activation, and residual
+operations are explicitly unmodeled, and there is no head parallelism,
+fusion, KV cache, or decoding loop. TensorForge is a design-space
+explorer, not an architecture optimizer. There is no continuous/automatic
+architecture search, no systolic timing, and no cycle accuracy. All
+numbers come from closed-form formulas over a `Gemm`, a `HardwareConfig`,
+an optional `PeArray`, an optional `MemoryHierarchy`, an optional
+`GemmTile` + `GemmSchedule`, an optional `TimingConfig`, an optional
+bounded `explore()` search, and an optional `TransformerBlockSpec`
+composing all of the above.
 
 ## Equations
 
@@ -151,6 +157,26 @@ but do not stop the search. Reports the "best among searched candidates"
 — never a claim of global or real-hardware optimality. See
 [docs/exploration.md](docs/exploration.md).
 
+### Transformer GEMM block (optional, requires SRAM + clock)
+
+```
+q/k/v/output projection: M=B*S, N=D, K=D, repetitions=1
+attention scores:        M=S,   N=S,   K=head_dim, repetitions=B*H
+attention value:         M=S,   N=head_dim, K=S,   repetitions=B*H
+mlp up/down:              M=B*S, N=F or D, K=D or F, repetitions=1
+
+modeled GEMM FLOPs = 8*B*S*D^2 + 4*B*S*D*F + 4*B*S^2*D
+```
+
+Decomposes a Transformer block's GEMM-heavy portion into 8 operation
+groups (given `B, S, D, H, F`) and evaluates all of them on one shared,
+fixed PE array, letting each operation choose its own best tile/schedule
+mapping via the existing explorer. Attention's B*H repetitions execute
+sequentially (no head parallelism). This is a **GEMM-only** estimate:
+softmax, normalization, activation, and residual additions are excluded,
+not free. PE-array shapes can also be compared across the whole block.
+See [docs/transformer.md](docs/transformer.md).
+
 ## Build / run
 
 ```bash
@@ -227,6 +253,20 @@ python -m tensorforge --m 256 --n 256 --k 256 --dtype fp16 \
     --pe-row-values 8,16,32 --pe-col-values 8,16,32 --top-k 5
 ```
 
+Use `--transformer-block` (with `--batch-size`/`--seq-len`/`--d-model`/
+`--num-heads`/`--d-ff`, `--sram-kib`, `--clock-ghz`, tile candidate lists,
+and either `--pe-rows`/`--pe-cols` for one fixed architecture or
+`--explore-pe` with `--pe-row-values`/`--pe-col-values` to compare PE
+architectures) to model a Transformer-like GEMM block:
+
+```bash
+python -m tensorforge --transformer-block \
+    --batch-size 1 --seq-len 128 --d-model 768 --num-heads 12 --d-ff 3072 \
+    --dtype fp16 --peak-tflops 100 --bandwidth-gbps 100 --sram-kib 512 \
+    --clock-ghz 1 --pe-rows 32 --pe-cols 32 \
+    --tile-m-values 16,32,64 --tile-n-values 16,32,64 --tile-k-values 16,32,64
+```
+
 ## Limitations
 
 - GEMM only; no convolution or Transformer operations yet.
@@ -262,6 +302,11 @@ python -m tensorforge --m 256 --n 256 --k 256 --dtype fp16 \
   no continuous optimization, no clock/bandwidth/SRAM sweep. A result is
   only the "best among searched candidates," never a global or
   real-hardware optimum.
+- Transformer block modeling (Milestone 8) is GEMM-only: softmax,
+  normalization, activation, and residual additions are unmodeled
+  (excluded, not free). Attention heads execute sequentially (no head
+  parallelism); no QKV/attention fusion, no cross-operation SRAM
+  residency, no KV cache, no decoding loop, no power/energy model.
 - Not validated against real hardware; not cycle-accurate.
 
 ## Roadmap
