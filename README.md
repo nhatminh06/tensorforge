@@ -188,11 +188,27 @@ python -m tensorforge --workload-preset gemm_tiny --accelerator-preset balanced 
 bash scripts/demo.sh
 ```
 
+## TensorForge Ops (Phase 2)
+
+TensorForge Core is frozen as a standalone modeling engine.
+`tensorforge_ops` (`src/tensorforge_ops/`) is a separate package built
+around it that logs deterministic Core experiment results to MLflow —
+Core never imports MLflow or `tensorforge_ops`, and continues to run and
+pass its full test suite without an MLflow server. See
+[docs/ops/README.md](docs/ops/README.md) and
+[docs/ops/mlflow-tracking.md](docs/ops/mlflow-tracking.md).
+
+```bash
+pip install -e ".[ops]"
+mlflow server --host 127.0.0.1 --port 5000 &
+export MLFLOW_TRACKING_URI=http://127.0.0.1:5000
+python -m tensorforge_ops track --workload-preset gemm_tiny --accelerator-preset balanced \
+    --tile-m-values 32,64,128 --tile-n-values 32,64,128 --tile-k-values 32,64,128
+```
+
 ## Next phase
 
-TensorForge Core is now frozen as a standalone modeling engine.
-`experiments.py` already produces deterministic JSON designed to be
-consumed by an external tracking layer without TensorForge Core ever
-depending on it. A future ML Systems / MLOps phase (experiment tracking,
-CI performance regression, benchmark validation) would build on top of
-this interface, not inside it.
+Further ML Systems / MLOps work (real benchmark measurement, predicted-
+vs-measured validation, CI performance regression, hardware right-sizing)
+builds on top of the deterministic experiment interface Core and Ops
+already expose — never inside Core itself.
