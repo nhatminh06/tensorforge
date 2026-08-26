@@ -175,6 +175,27 @@ comparisons. The GitHub workflow itself does **not** rely on this flag
 (see below), specifically so it keeps working even when the *base*
 checkout predates this flag's existence.
 
+## Telemetry context
+
+`python -m tensorforge_ops regression` optionally accepts
+`--baseline-telemetry-summary`/`--candidate-telemetry-summary` (both
+`TelemetrySummary` JSON files -- see
+[gpu-telemetry.md](gpu-telemetry.md)) and `--telemetry-output-json`. When
+both summaries are provided, a `## GPU Telemetry Context` section (GPU
+activity/memory activity/VRAM/power/temperature/clock deltas, plus any
+evidence-backed signals) is appended to the Markdown report, and the CLI
+prints the observed signals. This runs strictly **after**
+`compare_benchmark_results()` has already produced the final PASS/FAIL/
+ERROR status -- telemetry is never read by, and never changes,
+that decision. Every rendered telemetry section ends with an explicit
+statement: *"Telemetry is diagnostic context and does not affect the
+regression gate result."*
+
+The standard GitHub-hosted CPU PR workflow (below) does not collect or
+attach telemetry -- there is no GPU on those runners. Telemetry
+correlation is for local/self-hosted-GPU investigation of a regression,
+not part of the required PR check.
+
 ## GitHub Actions workflow
 
 `.github/workflows/performance-regression.yml` triggers on `pull_request`

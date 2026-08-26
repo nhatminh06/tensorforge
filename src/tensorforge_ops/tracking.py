@@ -37,6 +37,13 @@ from mlflow.tracking import MlflowClient
 from tensorforge.experiments import SCHEMA_VERSION, ExperimentResult, ExperimentSpec, run_experiment
 
 from tensorforge_ops.benchmark import BENCHMARK_SCHEMA_VERSION, BenchmarkResult
+from tensorforge_ops.telemetry import (
+    TELEMETRY_CORRELATION_SCHEMA_VERSION,
+    TELEMETRY_SCHEMA_VERSION,
+    TelemetryCorrelationResult,
+    TelemetrySummary,
+    TelemetryTrace,
+)
 from tensorforge_ops.calibration import (
     VALIDATION_SCHEMA_VERSION,
     DeviceCalibrationProfile,
@@ -466,6 +473,97 @@ def log_validation_summary(
         run_id = run.info.run_id
 
     return run_id
+
+
+def _build_telemetry_summary_metrics(summary: TelemetrySummary) -> dict:
+    metrics = {}
+
+    def _add(prefix, stat, *, want_min=False):
+        if stat.mean is not None:
+            metrics[f"{prefix}_mean"] = stat.mean
+        if stat.max is not None:
+            metrics[f"{prefix}_max"] = stat.max
+        if want_min and stat.min is not None:
+            metrics[f"{prefix}_min"] = stat.min
+
+    _add("telemetry_gpu_util_percent", summary.gpu_utilization_percent)
+    _add("telemetry_memory_activity_percent", summary.memory_activity_percent)
+    if summary.memory_used_bytes.max is not None:
+        metrics["telemetry_vram_used_max_bytes"] = float(summary.memory_used_bytes.max)
+    _add("telemetry_power_watts", summary.power_watts)
+    if summary.temperature_celsius.max is not None:
+        metrics["telemetry_temperature_max_celsius"] = summary.temperature_celsius.max
+    _add("telemetry_sm_clock_mhz", summary.sm_clock_mhz, want_min=True)
+    _add("telemetry_memory_clock_mhz", summary.memory_clock_mhz, want_min=True)
+    for name, stat in (
+        ("telemetry_sm_activity_percent", summary.sm_activity_percent),
+        ("telemetry_sm_occupancy_percent", summary.sm_occupancy_percent),
+        ("telemetry_tensor_activity_percent", summary.tensor_activity_percent),
+        ("telemetry_dram_bandwidth_utilization_percent", summary.dram_bandwidth_utilization_percent),
+    ):
+        _add(name, stat)
+    return metrics
+
+
+def log_telemetry(
+    tracking: TrackingConfig,
+    run_id: str,
+    trace: TelemetryTrace,
+    summary: TelemetrySummary,
+) -> None:
+    """Attach a TelemetryTrace + its TelemetrySummary to an existing
+    MLflow run -- by strong preference the same run already holding the
+    Core/benchmark artifacts for this workload. Never logs an
+    unavailable (None) metric as 0 -- see _build_telemetry_summary_metrics.
+    """
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+
+    for key, value in _build_telemetry_summary_metrics(summary).items():
+        client.log_metric(run_id, key, value)
+
+    advanced_metric_names = {
+        "sm_activity_percent", "sm_occupancy_percent", "tensor_activity_percent", "dram_bandwidth_utilization_percent",
+    }
+    tags = {
+        "tensorforge.telemetry": trace.backend,
+        "tensorforge.telemetry_schema_version": str(TELEMETRY_SCHEMA_VERSION),
+        "tensorforge.telemetry_device": trace.device_name or "",
+        "tensorforge.telemetry_advanced_metrics": (
+            "available" if advanced_metric_names & set(summary.available_metrics) else "unavailable"
+        ),
+    }
+    for key, value in tags.items():
+        client.set_tag(run_id, key, value)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        trace_path = os.path.join(tmpdir, "telemetry-trace.json")
+        with open(trace_path, "w", encoding="utf-8") as f:
+            f.write(trace.to_json())
+        client.log_artifact(run_id, trace_path)
+
+        summary_path = os.path.join(tmpdir, "telemetry-summary.json")
+        with open(summary_path, "w", encoding="utf-8") as f:
+            f.write(summary.to_json())
+        client.log_artifact(run_id, summary_path)
+
+
+def log_telemetry_correlation(tracking: TrackingConfig, run_id: str, correlation: TelemetryCorrelationResult) -> None:
+    """Attach a TelemetryCorrelationResult to an existing MLflow run.
+    Diagnostic evidence only -- never touches Milestone 14's regression
+    metrics/tags, and never implies a gate decision.
+    """
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+
+    client.set_tag(run_id, "tensorforge.telemetry_correlation", "diagnostic-context")
+    client.set_tag(run_id, "tensorforge.telemetry_correlation_schema_version", str(TELEMETRY_CORRELATION_SCHEMA_VERSION))
+    if correlation.signals:
+        client.set_tag(run_id, "tensorforge.telemetry_signal_count", str(len(correlation.signals)))
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "telemetry-correlation.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(correlation.to_json())
+        client.log_artifact(run_id, path)
 
 
 def list_runs(tracking: TrackingConfig, max_results: int = 20) -> tuple[dict, ...]:

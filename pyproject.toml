@@ -8,6 +8,7 @@ requires-python = ">=3.12"
 ops = ["mlflow>=2.20"]
 benchmark = ["torch>=2.4"]
 onnx = ["onnxruntime>=1.18", "torch>=2.4"]
+telemetry = ["nvidia-ml-py>=12.560"]
 
 [project.scripts]
 tensorforge-ops = "tensorforge_ops.cli:main"

@@ -1153,4 +1153,23 @@ TensorForge Core (`src/tensorforge/`) is frozen as a modeling boundary.
 - Never weaken a regression policy solely to make a specific PR pass;
   changing a threshold requires the same evidence-based justification as
   setting it the first time.
+- Telemetry collection never modifies benchmark latency samples --
+  it runs in a separate, representative workload window, never
+  concurrently with the timed latency loop.
+- Unavailable telemetry (an unsupported NVML/DCGM field) is `None`,
+  never `0`.
+- NVML memory utilization is device-memory read/write activity, not
+  automatically memory-bandwidth utilization -- do not relabel it.
+- Basic GPU/memory utilization telemetry alone does not prove a
+  bottleneck; word findings as evidence/signals, never as a proven root
+  cause or a specific "compute-bound"/"memory-bound" verdict.
+- The regression gate remains measured performance only; telemetry
+  (like calibration/validation) is diagnostic context that never changes
+  a RegressionResult's PASS/FAIL/ERROR status.
+- Do not infer a throttling event without actual clock-event/throttle-
+  reason telemetry evidence -- a clock drop alone is not sufficient.
+- TensorForge Ops must never modify physical GPU power limits, clocks,
+  fan curves, or performance states -- telemetry is observation-only.
+- DCGM profiling-metric availability must be proven at runtime
+  (capability query), never assumed from a device name or vendor claim.
 - No AI attribution.

@@ -59,6 +59,18 @@ its full test suite with no MLflow installed at all.
   and posts a report — see [regression-guard.md](regression-guard.md).
   This does not add GPU telemetry, hardware cost modeling, or automated
   root-cause diagnosis (all later milestones).
+- **Milestone 15** added **GPU telemetry correlation**
+  (`tensorforge_ops.telemetry`/`telemetry_nvml`): NVML-based GPU
+  utilization/memory-activity/VRAM/power/temperature/clock telemetry,
+  collected in a separate phase from latency measurement (never
+  perturbing Milestone-12 timing), summarized deterministically, and
+  compared baseline-vs-candidate as cautious, evidence-worded diagnostic
+  signals — never a gate condition, never merged into `BenchmarkResult`
+  — see [gpu-telemetry.md](gpu-telemetry.md). DCGM Exporter support is
+  DEFERRED (not implementable/verifiable on this project's development
+  GPU+OS combination). This does not add automated root-cause diagnosis,
+  Nsight/CUPTI integration, hardware cost modeling, or right-sizing (all
+  later milestones).
 
 ## Package layout
 
@@ -68,11 +80,12 @@ src/tensorforge_ops/
     tracking.py            TrackingConfig, TrackedRun, compute_result_fingerprint(),
                             track_result(), track_experiment(), list_runs(),
                             log_benchmark_result(), log_calibration_profile(),
+                            log_telemetry(), log_telemetry_correlation(),
                             log_validation_result(), log_validation_summary()
     benchmark.py            BenchmarkConfig, BenchmarkResult, latency statistics
                             (no torch dependency)
-    benchmark_pytorch.py    run_pytorch_benchmark() -- imports torch, imported
-                            lazily by the CLI so torch stays optional
+    benchmark_pytorch.py    run_pytorch_benchmark(), run_pytorch_telemetry_window() --
+                            imports torch, imported lazily by the CLI
     calibration.py          CalibrationConfig, DeviceCalibrationProfile, predict(),
                             validate_prediction(), ValidationSummary (no torch dependency)
     calibration_pytorch.py  run_pytorch_calibration() -- imports torch, imported
@@ -80,8 +93,12 @@ src/tensorforge_ops/
     regression.py           RegressionPolicy, compare_benchmark_results(),
                             compare_regression_suite(), render_markdown_report()
                             (no torch dependency, no MLflow dependency)
+    telemetry.py             TelemetryConfig, TelemetryTrace, TelemetrySummary,
+                            correlate_telemetry() (no torch/NVML/MLflow dependency)
+    telemetry_nvml.py        NvmlProvider, run_telemetry_window(), probe_capabilities() --
+                            imports pynvml (nvidia-ml-py), imported lazily by the CLI
     cli.py                 python -m tensorforge_ops track / list-runs / benchmark /
-                            calibrate / validate / validate-suite / regression
+                            calibrate / validate / validate-suite / regression / telemetry
     __main__.py
 ```
 
@@ -172,6 +189,26 @@ comparison is meaningful. See
 semantics, same-runner requirements, and CUDA self-hosted-runner
 limitations.
 
+## GPU telemetry (Milestone 15)
+
+```bash
+python -m tensorforge_ops telemetry probe --device-index 0
+
+python -m tensorforge_ops benchmark \
+    --workload-preset gemm_large_square --accelerator-preset balanced \
+    --tile-m-values 32,64,128 --tile-n-values 32,64,128 --tile-k-values 32,64,128 \
+    --backend pytorch --device cuda --telemetry nvml --telemetry-duration 5
+```
+
+Collects real NVML telemetry (GPU/memory activity, VRAM, power,
+temperature, clocks) in a separate phase after latency measurement, so
+Milestone 12's timing is untouched. `python -m tensorforge_ops
+regression ... --baseline-telemetry-summary ... --candidate-telemetry-summary ...`
+appends a diagnostic "GPU Telemetry Context" section to a regression
+report -- evidence only, never part of the PASS/FAIL decision. See
+[gpu-telemetry.md](gpu-telemetry.md) for metric semantics, sampling
+methodology, and live RTX 3050 results.
+
 ## Current end-to-end flow
 
 ```
@@ -186,7 +223,9 @@ device calibration (Milestone 13)
 prediction-vs-measurement validation (Milestone 13)
       |
 PR performance regression guard (Milestone 14)
+      |
+GPU telemetry correlation (Milestone 15)
 ```
 
-GPU telemetry correlation and hardware right-sizing/cost planning are
+Hardware right-sizing/cost planning and a model-change impact report are
 future milestones, not yet implemented.
