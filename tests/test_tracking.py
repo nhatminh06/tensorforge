@@ -1,0 +1,291 @@
+import json
+import subprocess
+
+import pytest
+
+mlflow = pytest.importorskip("mlflow")
+
+from mlflow.tracking import MlflowClient
+
+from tensorforge.experiments import ExperimentSpec, run_experiment
+from tensorforge_ops.tracking import (
+    TrackingConfig,
+    compute_result_fingerprint,
+    list_runs,
+    resolve_tracking_uri,
+    track_experiment,
+    track_result,
+)
+
+
+def make_spec(**overrides):
+    defaults = dict(
+        name="test-experiment",
+        workload_preset="gemm_tiny",
+        accelerator_preset="balanced",
+        tile_m_values=(32, 64),
+        tile_n_values=(32, 64),
+        tile_k_values=(32, 64),
+    )
+    defaults.update(overrides)
+    return ExperimentSpec(**defaults)
+
+
+@pytest.fixture(autouse=True)
+def _run_in_tmp_path(tmp_path, monkeypatch):
+    # MLflow's sqlite backend store defaults artifact storage to ./mlruns
+    # relative to the CWD unless an artifact location is set explicitly.
+    # Running each test from inside tmp_path keeps every MLflow-created
+    # file (backend DB, artifact store) out of the repository entirely.
+    monkeypatch.chdir(tmp_path)
+
+
+def tracking_config(tmp_path, experiment_name="tensorforge-test"):
+    uri = f"sqlite:///{tmp_path}/mlflow.db"
+    return TrackingConfig(tracking_uri=uri, experiment_name=experiment_name)
+
+
+# --- TrackingConfig validation --------------------------------------------------
+
+def test_tracking_config_rejects_empty_experiment_name():
+    with pytest.raises(ValueError):
+        TrackingConfig(tracking_uri="sqlite:///x.db", experiment_name="")
+
+
+def test_resolve_tracking_uri_precedence(monkeypatch):
+    monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    assert resolve_tracking_uri("http://explicit:5000") == "http://explicit:5000"
+
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://from-env:5000")
+    assert resolve_tracking_uri(None) == "http://from-env:5000"
+    assert resolve_tracking_uri("http://explicit:5000") == "http://explicit:5000"
+
+    monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    assert resolve_tracking_uri(None) is None
+
+
+# --- fingerprint -----------------------------------------------------------------
+
+def test_fingerprint_format():
+    result = run_experiment(make_spec())
+    fingerprint = compute_result_fingerprint(result)
+    assert fingerprint.startswith("sha256:")
+    assert len(fingerprint) == len("sha256:") + 64
+
+
+def test_identical_spec_gives_identical_fingerprint():
+    spec = make_spec()
+    result1 = run_experiment(spec)
+    result2 = run_experiment(spec)
+    assert compute_result_fingerprint(result1) == compute_result_fingerprint(result2)
+
+
+def test_different_accelerator_gives_different_fingerprint():
+    result_balanced = run_experiment(make_spec(accelerator_preset="balanced"))
+    result_compute_heavy = run_experiment(make_spec(accelerator_preset="compute_heavy"))
+    assert compute_result_fingerprint(result_balanced) != compute_result_fingerprint(result_compute_heavy)
+
+
+# --- local temporary MLflow backend: tracking one run ----------------------------
+
+def test_track_known_gemm_run(tmp_path):
+    tracking = tracking_config(tmp_path)
+    spec = make_spec()
+    result = run_experiment(spec)
+
+    tracked = track_result(result, tracking)
+
+    assert tracked.experiment_name == tracking.experiment_name
+    assert tracked.tracking_uri == tracking.tracking_uri
+    assert tracked.result_fingerprint == compute_result_fingerprint(result)
+
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    experiment = client.get_experiment_by_name(tracking.experiment_name)
+    assert experiment is not None
+
+    run = client.get_run(tracked.run_id)
+    assert run.data.params["workload_preset"] == "gemm_tiny"
+    assert run.data.params["accelerator_preset"] == "balanced"
+    assert run.data.params["workload_kind"] == "gemm"
+    assert "modeled_flops" in run.data.metrics
+    assert "perfect_overlap_time_seconds" in run.data.metrics
+    assert run.data.metrics["modeled_flops"] == result.primary_metrics["total_flops"]
+    assert run.data.tags["tensorforge.result_fingerprint"] == tracked.result_fingerprint
+    assert run.data.tags["tensorforge.workload_kind"] == "gemm"
+    assert run.data.tags["tensorforge.core_schema_version"] == "1"
+
+
+def test_track_experiment_matches_track_result(tmp_path):
+    tracking = tracking_config(tmp_path)
+    spec = make_spec()
+
+    tracked = track_experiment(spec, tracking)
+    result = run_experiment(spec)  # same spec, independently re-run
+
+    assert tracked.result_fingerprint == compute_result_fingerprint(result)
+
+
+# --- fingerprint identity vs. MLflow run identity --------------------------------
+
+def test_identical_experiment_tracked_twice_has_different_run_ids_same_fingerprint(tmp_path):
+    tracking = tracking_config(tmp_path)
+    spec = make_spec()
+
+    tracked1 = track_experiment(spec, tracking)
+    tracked2 = track_experiment(spec, tracking)
+
+    assert tracked1.run_id != tracked2.run_id
+    assert tracked1.result_fingerprint == tracked2.result_fingerprint
+
+
+def test_changed_accelerator_changes_fingerprint_and_tracked_param(tmp_path):
+    tracking = tracking_config(tmp_path)
+
+    tracked_balanced = track_experiment(make_spec(accelerator_preset="balanced"), tracking)
+    tracked_heavy = track_experiment(make_spec(accelerator_preset="compute_heavy"), tracking)
+
+    assert tracked_balanced.result_fingerprint != tracked_heavy.result_fingerprint
+
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    run_balanced = client.get_run(tracked_balanced.run_id)
+    run_heavy = client.get_run(tracked_heavy.run_id)
+    assert run_balanced.data.params["accelerator_preset"] == "balanced"
+    assert run_heavy.data.params["accelerator_preset"] == "compute_heavy"
+    assert run_balanced.data.params["pe_rows"] != run_heavy.data.params["pe_rows"]
+
+
+# --- artifact exactness -----------------------------------------------------------
+
+def test_logged_artifact_is_byte_identical_to_core_json(tmp_path):
+    tracking = tracking_config(tmp_path)
+    spec = make_spec()
+    result = run_experiment(spec)
+
+    tracked = track_result(result, tracking)
+
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    local_path = client.download_artifacts(tracked.run_id, "core-result.json", str(tmp_path))
+    with open(local_path, encoding="utf-8") as f:
+        artifact_text = f.read()
+
+    assert artifact_text == result.to_json()
+    # no MLflow metadata was injected into the artifact
+    parsed = json.loads(artifact_text)
+    assert set(parsed.keys()) == {
+        "schema_version", "name", "workload", "accelerator", "search",
+        "primary_metrics", "selected_mappings", "limitations",
+    }
+
+
+def test_tracking_metadata_artifact_is_separate_from_core_result(tmp_path):
+    tracking = tracking_config(tmp_path)
+    result = run_experiment(make_spec())
+    tracked = track_result(result, tracking)
+
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    local_path = client.download_artifacts(tracked.run_id, "tracking-metadata.json", str(tmp_path))
+    with open(local_path, encoding="utf-8") as f:
+        metadata = json.load(f)
+
+    assert "git" in metadata
+    assert "mlflow_experiment_name" in metadata
+    # the deterministic core result fields must NOT appear in this file
+    assert "primary_metrics" not in metadata
+
+
+# --- Core result unchanged by tracking -------------------------------------------
+
+def test_tracking_does_not_mutate_core_result(tmp_path):
+    tracking = tracking_config(tmp_path)
+    spec = make_spec()
+    result = run_experiment(spec)
+    before = result.to_json()
+
+    track_result(result, tracking)
+
+    assert result.to_json() == before
+
+
+# --- experiment separation --------------------------------------------------------
+
+def test_separate_experiments_stay_separate(tmp_path):
+    tracking_a = tracking_config(tmp_path, experiment_name="tensorforge-a")
+    tracking_b = tracking_config(tmp_path, experiment_name="tensorforge-b")
+
+    tracked_a = track_experiment(make_spec(), tracking_a)
+    tracked_b = track_experiment(make_spec(), tracking_b)
+
+    assert tracked_a.experiment_id != tracked_b.experiment_id
+
+    runs_a = list_runs(tracking_a)
+    runs_b = list_runs(tracking_b)
+    assert {r["run_id"] for r in runs_a} == {tracked_a.run_id}
+    assert {r["run_id"] for r in runs_b} == {tracked_b.run_id}
+
+
+# --- multi-accelerator comparison --------------------------------------------------
+
+def test_three_accelerator_comparison(tmp_path):
+    tracking = tracking_config(tmp_path)
+    tracked = {
+        accel: track_experiment(make_spec(accelerator_preset=accel), tracking)
+        for accel in ("small", "balanced", "compute_heavy")
+    }
+    runs = list_runs(tracking, max_results=10)
+    assert len(runs) == 3
+    fingerprints = {t.result_fingerprint for t in tracked.values()}
+    assert len(fingerprints) == 3  # all analytically different
+
+
+# --- Transformer / Conv tracking ---------------------------------------------------
+
+def test_track_transformer_workload(tmp_path):
+    tracking = tracking_config(tmp_path)
+    spec = make_spec(workload_preset="transformer_small")
+    tracked = track_experiment(spec, tracking)
+
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    run = client.get_run(tracked.run_id)
+    assert run.data.params["workload_kind"] == "transformer"
+    assert "modeled_flops" in run.data.metrics
+    assert run.data.tags["tensorforge.largest_time_contributor"]
+
+
+def test_track_conv_workload_logs_im2col_expansion(tmp_path):
+    tracking = tracking_config(tmp_path)
+    spec = make_spec(workload_preset="conv_spatial")
+    tracked = track_experiment(spec, tracking)
+
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    run = client.get_run(tracked.run_id)
+    assert run.data.params["workload_kind"] == "conv2d"
+    assert "im2col_expansion_ratio" in run.data.metrics
+    assert run.data.metrics["im2col_expansion_ratio"] > 1.0
+
+
+# --- unknown presets ---------------------------------------------------------------
+
+def test_unknown_workload_preset_fails_before_tracking(tmp_path):
+    tracking = tracking_config(tmp_path)
+    spec = make_spec(workload_preset="does-not-exist")
+    with pytest.raises(ValueError):
+        track_experiment(spec, tracking)
+
+
+def test_unknown_accelerator_preset_fails_before_tracking(tmp_path):
+    tracking = tracking_config(tmp_path)
+    spec = make_spec(accelerator_preset="does-not-exist")
+    with pytest.raises(ValueError):
+        track_experiment(spec, tracking)
+
+
+# --- Core boundary: no MLflow import anywhere under src/tensorforge/ --------------
+
+def test_core_package_does_not_import_mlflow():
+    output = subprocess.run(
+        ["grep", "-rl", "mlflow", "src/tensorforge/"],
+        cwd=__file__.rsplit("/tests/", 1)[0],
+        capture_output=True, text=True,
+    )
+    # grep exit code 1 means "no matches" -- that's the expected, passing state.
+    assert output.returncode == 1, f"unexpected mlflow reference(s) in Core:\n{output.stdout}"

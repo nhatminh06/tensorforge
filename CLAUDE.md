@@ -1057,3 +1057,36 @@ the user understanding why every result exists
 ```
 
 make the result understandable.
+
+---
+
+## TensorForge Ops (Phase 2)
+
+TensorForge Core (`src/tensorforge/`) is frozen as a modeling boundary.
+
+- Core must never import `mlflow` or `tensorforge_ops`. Dependency
+  direction is strictly `tensorforge_ops -> tensorforge`, never the
+  reverse.
+- `tensorforge_ops` consumes an already-computed, immutable
+  `ExperimentResult` -- it never re-derives or adjusts an analytical
+  value to make it "fit" MLflow.
+- Tracking is a side effect layered around a deterministic Core result,
+  not a source of analytical truth. `core-result.json` (the exact
+  `ExperimentResult.to_json()` bytes) is authoritative; MLflow
+  params/metrics/tags are an index for filtering and comparison only.
+- No silent tracking fallback: if a user explicitly configures a
+  tracking URI and it is unreachable, fail clearly. Never substitute a
+  different backend than the one requested.
+- No AI attribution, ever, in Ops code either.
+- Do not commit changes until pytest passes, a real local MLflow
+  verification has been run, and the Core/Ops import boundary has been
+  checked.
+- Real hardware benchmarks (a later milestone) must always be recorded
+  and labeled separately from analytical predictions -- never merge a
+  measured value into a field that currently means "modeled" or
+  "analytical," and never call an analytical output "benchmark data."
+- Performance claims require actual measurements; an analytical
+  TensorForge result is a prediction, not a benchmark, until compared
+  against one.
+- The learning-report requirement from Phase 1 continues to apply to
+  every Phase-2 milestone.

@@ -3,3 +3,8 @@ __pycache__/
 .venv/
 *.egg-info/
 .pytest_cache/
+
+# Local MLflow tracking backend/artifacts (tensorforge_ops manual testing)
+mlflow.db
+mlruns/
+mlartifacts/
