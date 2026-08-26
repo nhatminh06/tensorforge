@@ -8,10 +8,12 @@ mlflow = pytest.importorskip("mlflow")
 from mlflow.tracking import MlflowClient
 
 from tensorforge.experiments import ExperimentSpec, run_experiment
+from tensorforge_ops.benchmark import BenchmarkConfig, BenchmarkResult, compute_latency_statistics
 from tensorforge_ops.tracking import (
     TrackingConfig,
     compute_result_fingerprint,
     list_runs,
+    log_benchmark_result,
     resolve_tracking_uri,
     track_experiment,
     track_result,
@@ -277,6 +279,89 @@ def test_unknown_accelerator_preset_fails_before_tracking(tmp_path):
     spec = make_spec(accelerator_preset="does-not-exist")
     with pytest.raises(ValueError):
         track_experiment(spec, tracking)
+
+
+# --- attaching a measured benchmark to an already-tracked analytical run --------
+
+def make_benchmark_result(fingerprint, samples=(0.01, 0.011, 0.009, 0.0105, 0.0095), peak_memory=None):
+    return BenchmarkResult(
+        core_result_fingerprint=fingerprint,
+        workload_preset="gemm_tiny",
+        workload_kind="gemm",
+        backend="pytorch",
+        device="cpu",
+        dtype="fp16",
+        warmup_iterations=2,
+        measured_iterations=len(samples),
+        latency_samples_seconds=tuple(samples),
+        statistics=compute_latency_statistics(samples),
+        peak_memory_allocated_bytes=peak_memory,
+        runtime_metadata={"torch_version": "2.4.0", "device_type": "cpu"},
+    )
+
+
+def test_log_benchmark_result_attaches_to_same_run_as_analytical_result(tmp_path):
+    tracking = tracking_config(tmp_path)
+    result = run_experiment(make_spec())
+    tracked = track_result(result, tracking)
+
+    benchmark = make_benchmark_result(tracked.result_fingerprint)
+    log_benchmark_result(tracking, tracked.run_id, benchmark)
+
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    run = client.get_run(tracked.run_id)
+
+    # analytical metrics from track_result() are untouched
+    assert "perfect_overlap_time_seconds" in run.data.metrics
+    # measured metrics sit alongside them, never overwriting predicted names
+    assert run.data.metrics["measured_mean_latency_seconds"] == pytest.approx(benchmark.statistics.mean_seconds)
+    assert run.data.metrics["measured_throughput_per_second"] == pytest.approx(benchmark.statistics.throughput_per_second)
+    assert "measured_p95_latency_seconds" not in run.data.metrics  # below the 20-sample threshold
+    assert run.data.tags["tensorforge.core_result_fingerprint"] == tracked.result_fingerprint
+    assert run.data.tags["tensorforge.measurement"] == "real"
+    assert run.data.params["benchmark_backend"] == "pytorch"
+    assert run.data.params["runtime_torch_version"] == "2.4.0"
+
+
+def test_log_benchmark_result_omits_none_peak_memory_metric(tmp_path):
+    tracking = tracking_config(tmp_path)
+    result = run_experiment(make_spec())
+    tracked = track_result(result, tracking)
+
+    benchmark = make_benchmark_result(tracked.result_fingerprint, peak_memory=None)
+    log_benchmark_result(tracking, tracked.run_id, benchmark)
+
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    run = client.get_run(tracked.run_id)
+    assert "measured_peak_memory_allocated_bytes" not in run.data.metrics
+
+
+def test_log_benchmark_result_logs_positive_peak_memory_metric(tmp_path):
+    tracking = tracking_config(tmp_path)
+    result = run_experiment(make_spec())
+    tracked = track_result(result, tracking)
+
+    benchmark = make_benchmark_result(tracked.result_fingerprint, peak_memory=123456)
+    log_benchmark_result(tracking, tracked.run_id, benchmark)
+
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    run = client.get_run(tracked.run_id)
+    assert run.data.metrics["measured_peak_memory_allocated_bytes"] == 123456.0
+
+
+def test_log_benchmark_result_artifact_is_byte_identical_to_benchmark_json(tmp_path):
+    tracking = tracking_config(tmp_path)
+    result = run_experiment(make_spec())
+    tracked = track_result(result, tracking)
+
+    benchmark = make_benchmark_result(tracked.result_fingerprint)
+    log_benchmark_result(tracking, tracked.run_id, benchmark)
+
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    local_path = client.download_artifacts(tracked.run_id, "benchmark-result.json", str(tmp_path))
+    with open(local_path, encoding="utf-8") as f:
+        artifact_text = f.read()
+    assert artifact_text == benchmark.to_json()
 
 
 # --- Core boundary: no MLflow import anywhere under src/tensorforge/ --------------

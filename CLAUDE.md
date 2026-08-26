@@ -1090,3 +1090,19 @@ TensorForge Core (`src/tensorforge/`) is frozen as a modeling boundary.
   against one.
 - The learning-report requirement from Phase 1 continues to apply to
   every Phase-2 milestone.
+- Real benchmark fields always use an explicit `measured_*` prefix
+  (e.g. `measured_mean_latency_seconds`); Core's analytical field names
+  (e.g. `perfect_overlap_time_seconds`) are never overwritten or reused
+  for a measured value.
+- A benchmark backend (PyTorch, later ONNX Runtime) is a runtime
+  dependency of `tensorforge_ops` only, imported lazily so the rest of
+  Ops (and all of Core) keeps working with that backend not installed.
+- CUDA timing must be explicitly synchronized (`torch.cuda.synchronize()`
+  around the measured region); never time only kernel-launch/enqueue.
+  Warmup iterations are always excluded from statistics. Never silently
+  fall back from a requested device/backend to a different one -- fail
+  clearly instead.
+- Do not describe a benchmark as measuring a specific real accelerator
+  (e.g. "RTX 4090") unless it is the literal physical machine the
+  benchmark ran on; Core's generic accelerator presets are not the
+  benchmarking machine.
