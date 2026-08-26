@@ -6,21 +6,23 @@ capacity. It starts from analytical models and adds architectural detail
 incrementally (PE arrays, memory hierarchy, tiling, dataflows, convolution,
 Transformer operations).
 
-## Current model (Milestone 6)
+## Current model (Milestone 7)
 
 Analytical GEMM + roofline + rectangular PE mapping + SRAM capacity +
 explicit GEMM tiling traffic under three explicit loop-order/residency
 schedules (`c-resident`, `a-resident`, `b-resident`) + analytical
-compute/memory execution timing. Tiled DRAM traffic is exact only for the
-specific modeled schedule used — not a claim of optimal, universal, or
-real-hardware GEMM traffic, and not yet a claim that these schedules
-implement general "output/input/weight stationary" hardware dataflows.
-Timing is an idealized bandwidth-only, no-pipeline analytical estimate —
-not measured runtime. There is no automatic tile/schedule/architecture
+compute/memory execution timing + a bounded, deterministic design-space
+explorer over user-supplied tile/schedule/PE-array candidates. Tiled DRAM
+traffic is exact only for the specific modeled schedule used; timing is
+an idealized bandwidth-only, no-pipeline analytical estimate; exploration
+results are only the "best among searched candidates," never a global or
+real-hardware optimum. TensorForge is a design-space explorer, not an
+architecture optimizer. There is no continuous/automatic architecture
 search, no systolic timing, and no cycle accuracy. All numbers come from
 closed-form formulas over a `Gemm`, a `HardwareConfig`, an optional
 `PeArray`, an optional `MemoryHierarchy`, an optional `GemmTile` +
-`GemmSchedule`, and an optional `TimingConfig`.
+`GemmSchedule`, an optional `TimingConfig`, and an optional bounded
+`explore()` search over these.
 
 ## Equations
 
@@ -129,6 +131,26 @@ compute-bound/memory-bound/balanced classification. `PeArray` gains no
 new fields — clock frequency is a separate `TimingConfig`. See
 [docs/timing.md](docs/timing.md).
 
+### Bounded configuration exploration (optional, requires SRAM + clock)
+
+```
+candidate_count = len(tile_m) * len(tile_n) * len(tile_k)
+                   * len(pe_rows) * len(pe_cols) * len(schedules)
+                   (rejected outright if it exceeds 100,000)
+
+rank by: perfect_overlap_time_seconds ascending
+  tie-break: serialized_time, total_dram_bytes, compute_cycles,
+             PE count, then candidate fields lexicographically
+```
+
+Searches a finite, user-supplied Cartesian product of tile shapes,
+residency schedules, and PE-array shapes (GEMM, dtype, SRAM, clock, and
+bandwidth stay fixed), driving the existing tiling/PE/timing models —
+no new performance formulas. Infeasible tiles (exceed SRAM) are excluded
+but do not stop the search. Reports the "best among searched candidates"
+— never a claim of global or real-hardware optimality. See
+[docs/exploration.md](docs/exploration.md).
+
 ## Build / run
 
 ```bash
@@ -193,6 +215,18 @@ python -m tensorforge --m 4 --n 4 --k 4 --dtype fp32 \
     --sram-kib 0.0625 --tile-m 2 --tile-n 2 --tile-k 2 --clock-ghz 1
 ```
 
+Use `--explore` (with `--sram-kib` and `--clock-ghz`, and candidate lists
+instead of single-run `--tile-m`/`--pe-rows`/`--schedule`) to search and
+rank a bounded configuration space:
+
+```bash
+python -m tensorforge --m 256 --n 256 --k 256 --dtype fp16 \
+    --peak-tflops 100 --bandwidth-gbps 100 --sram-kib 32 --clock-ghz 1 \
+    --explore \
+    --tile-m-values 16,32,64 --tile-n-values 16,32,64 --tile-k-values 16,32 \
+    --pe-row-values 8,16,32 --pe-col-values 8,16,32 --top-k 5
+```
+
 ## Limitations
 
 - GEMM only; no convolution or Transformer operations yet.
@@ -223,6 +257,11 @@ python -m tensorforge --m 4 --n 4 --k 4 --dtype fp32 \
   model. Bandwidth-only DRAM timing: no DRAM latency, bank conflicts,
   burst inefficiency, or controller overhead. No SRAM timing, no PE
   pipeline fill/drain, no NoC, no power/energy.
+- Exploration (Milestone 7) is a bounded discrete search over
+  user-supplied candidate sets only — no automatic candidate generation,
+  no continuous optimization, no clock/bandwidth/SRAM sweep. A result is
+  only the "best among searched candidates," never a global or
+  real-hardware optimum.
 - Not validated against real hardware; not cycle-accurate.
 
 ## Roadmap
