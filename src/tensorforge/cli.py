@@ -25,6 +25,13 @@ from tensorforge.convolution import (
     evaluate_conv2d,
     explore_conv2d_architectures,
 )
+from tensorforge.presets import (
+    list_accelerator_presets,
+    list_workload_presets,
+    get_accelerator_preset,
+    get_workload_preset,
+)
+from tensorforge.experiments import ExperimentSpec, run_experiment
 
 _DTYPE_CHOICES = {"fp32": DType.FP32, "fp16": DType.FP16, "int8": DType.INT8}
 _OP_DISPLAY_NAMES = {
@@ -86,13 +93,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--peak-tflops",
         type=float,
-        required=True,
+        default=None,
         help="Peak compute throughput in TFLOP/s (10^12 FLOP/s).",
     )
     parser.add_argument(
         "--bandwidth-gbps",
         type=float,
-        required=True,
+        default=None,
         help="Memory bandwidth in GB/s (10^9 bytes/s).",
     )
     parser.add_argument("--name", default="Example Accelerator")
@@ -145,6 +152,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stride-w", type=int, default=1)
     parser.add_argument("--padding-h", type=int, default=0)
     parser.add_argument("--padding-w", type=int, default=0)
+    parser.add_argument("--list-presets", action="store_true")
+    parser.add_argument("--workload-preset", default=None)
+    parser.add_argument("--accelerator-preset", default=None)
+    parser.add_argument("--experiment-name", default=None)
+    parser.add_argument("--output-json", default=None)
+    parser.add_argument("--force", action="store_true")
     return parser
 
 
@@ -575,9 +588,119 @@ def _run_conv2d(parser: argparse.ArgumentParser, args, hardware: HardwareConfig)
         _print_conv2d_result(spec, args, pe_array, evaluation)
 
 
+def _print_list_presets() -> None:
+    print("Workload presets (generic experiment configurations, not real models)")
+    for name in list_workload_presets():
+        preset = get_workload_preset(name)
+        print(f"  {name:<28} [{preset.kind:<11}] {preset.description}")
+    print()
+    print("Accelerator presets (generic experiment configurations, not real hardware)")
+    for name in list_accelerator_presets():
+        preset = get_accelerator_preset(name)
+        print(
+            f"  {name:<16} PE {preset.pe_rows}x{preset.pe_cols}, "
+            f"SRAM {_format_bytes(preset.sram_bytes)}, "
+            f"clock {preset.clock_hz / 1e9:.2f} GHz, "
+            f"bandwidth {preset.bandwidth_bytes_per_second / 1e9:.0f} GB/s"
+        )
+        print(f"    {preset.description}")
+
+
+def _run_preset_experiment(parser: argparse.ArgumentParser, args) -> None:
+    tile_m_values = _parse_int_list(parser, "--tile-m-values", args.tile_m_values)
+    tile_n_values = _parse_int_list(parser, "--tile-n-values", args.tile_n_values)
+    tile_k_values = _parse_int_list(parser, "--tile-k-values", args.tile_k_values)
+
+    schedule_names = None
+    if args.schedule_values is not None:
+        schedule_names = tuple(s.strip() for s in args.schedule_values.split(","))
+
+    name = args.experiment_name or f"{args.workload_preset}-on-{args.accelerator_preset}"
+
+    try:
+        spec = ExperimentSpec(
+            name=name,
+            workload_preset=args.workload_preset,
+            accelerator_preset=args.accelerator_preset,
+            tile_m_values=tuple(tile_m_values),
+            tile_n_values=tuple(tile_n_values),
+            tile_k_values=tuple(tile_k_values),
+            schedule_names=schedule_names,
+        )
+        result = run_experiment(spec)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    print(f"Experiment: {name}")
+    print()
+    print(f"Workload preset:     {args.workload_preset} ({result.workload_kind})")
+    print(f"Accelerator preset:  {args.accelerator_preset}")
+    print()
+    print("Primary metrics")
+    for key, value in result.primary_metrics.items():
+        if isinstance(value, float) and "time" in key:
+            print(f"  {key:<32} {_format_seconds(value)}")
+        elif isinstance(value, float):
+            print(f"  {key:<32} {value:.4f}")
+        else:
+            print(f"  {key:<32} {value}")
+    print()
+    print("Selected mappings")
+    for mapping in result.selected_mappings:
+        print(f"  {mapping}")
+
+    if args.output_json is not None:
+        try:
+            result.save(args.output_json, force=args.force)
+        except FileExistsError as exc:
+            parser.error(str(exc))
+        print()
+        print(f"Wrote deterministic result JSON: {args.output_json}")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    if args.list_presets:
+        _print_list_presets()
+        return
+
+    preset_mode = args.workload_preset is not None or args.accelerator_preset is not None
+    if preset_mode:
+        if args.workload_preset is None or args.accelerator_preset is None:
+            parser.error("--workload-preset and --accelerator-preset must be provided together")
+
+        tile_args_preset = (args.tile_m, args.tile_n, args.tile_k)
+        conflicting = (
+            ("--m/--n/--k", any(v is not None for v in (args.m, args.n, args.k))),
+            ("--transformer-block", args.transformer_block),
+            ("--conv2d", args.conv2d),
+            ("--pe-rows/--pe-cols", args.pe_rows is not None or args.pe_cols is not None),
+            ("--explore", args.explore),
+            ("--explore-pe", args.explore_pe),
+            ("--tile-m/--tile-n/--tile-k", any(t is not None for t in tile_args_preset)),
+            ("--schedule/--compare-schedules", args.schedule is not None or args.compare_schedules),
+            ("--sram-kib", args.sram_kib is not None),
+            ("--clock-ghz", args.clock_ghz is not None),
+            ("--peak-tflops/--bandwidth-gbps",
+             args.peak_tflops is not None or args.bandwidth_gbps is not None),
+        )
+        conflicts = [name for name, present in conflicting if present]
+        if conflicts:
+            parser.error(f"--workload-preset/--accelerator-preset cannot be combined with {', '.join(conflicts)}")
+        if any(v is None for v in (args.tile_m_values, args.tile_n_values, args.tile_k_values)):
+            parser.error(
+                "--workload-preset/--accelerator-preset require --tile-m-values, "
+                "--tile-n-values, and --tile-k-values"
+            )
+
+        _run_preset_experiment(parser, args)
+        return
+
+    if args.peak_tflops is None or args.bandwidth_gbps is None:
+        parser.error("--peak-tflops and --bandwidth-gbps are required (unless using --list-presets "
+                     "or --workload-preset/--accelerator-preset)")
 
     if (args.pe_rows is None) != (args.pe_cols is None):
         parser.error("--pe-rows and --pe-cols must be provided together")

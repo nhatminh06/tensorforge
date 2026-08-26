@@ -43,6 +43,18 @@ from tensorforge.convolution import (
     explore_conv2d_architectures,
     lower_conv2d_to_gemm,
 )
+from tensorforge.presets import (
+    AcceleratorPreset,
+    CnnPreset,
+    ConvPreset,
+    GemmPreset,
+    TransformerPreset,
+    get_accelerator_preset,
+    get_workload_preset,
+    list_accelerator_presets,
+    list_workload_presets,
+)
+from tensorforge.experiments import ExperimentResult, ExperimentSpec, run_experiment
 
 __all__ = [
     "DType",
@@ -95,4 +107,16 @@ __all__ = [
     "explore_cnn_architectures",
     "explore_conv2d_architectures",
     "lower_conv2d_to_gemm",
+    "AcceleratorPreset",
+    "CnnPreset",
+    "ConvPreset",
+    "GemmPreset",
+    "TransformerPreset",
+    "get_accelerator_preset",
+    "get_workload_preset",
+    "list_accelerator_presets",
+    "list_workload_presets",
+    "ExperimentResult",
+    "ExperimentSpec",
+    "run_experiment",
 ]
