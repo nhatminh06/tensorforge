@@ -23,22 +23,35 @@ The arrow never points back into Core: nothing under `src/tensorforge/`
 imports `mlflow` or `tensorforge_ops`, and Core continues to run and pass
 its full test suite with no MLflow installed at all.
 
-## Milestone 11 scope
+## Scope so far
 
-This milestone adds **reproducible MLflow experiment tracking** for
-already-deterministic Core results. It is not model training, not real
-GPU benchmarking, not a regression gate, and not hardware right-sizing —
-see [mlflow-tracking.md](mlflow-tracking.md) for the full detail and
-[docs/limitations.md](../limitations.md) for what is not modeled.
+- **Milestone 11** added **reproducible MLflow experiment tracking** for
+  already-deterministic Core results. It is not model training and not a
+  regression gate or hardware right-sizing tool — see
+  [mlflow-tracking.md](mlflow-tracking.md) and
+  [docs/limitations.md](../limitations.md).
+- **Milestone 12** added a **real PyTorch benchmark runner**
+  (`tensorforge_ops.benchmark_pytorch`) that actually executes GEMM/
+  Conv2D/Transformer-GEMM-only workloads and measures real latency,
+  throughput, and (on CUDA) peak allocated memory, attached to the same
+  MLflow run as the analytical result under explicit `measured_*` field
+  names — see [benchmarking.md](benchmarking.md). This is not a
+  prediction-accuracy comparison (that is a later milestone) and does not
+  include an ONNX Runtime backend yet (DEFERRED, see that doc).
 
 ## Package layout
 
 ```
 src/tensorforge_ops/
-    __init__.py     public exports
-    tracking.py      TrackingConfig, TrackedRun, compute_result_fingerprint(),
-                      track_result(), track_experiment(), list_runs()
-    cli.py           python -m tensorforge_ops track / list-runs
+    __init__.py         public exports
+    tracking.py          TrackingConfig, TrackedRun, compute_result_fingerprint(),
+                          track_result(), track_experiment(), list_runs(),
+                          log_benchmark_result()
+    benchmark.py          BenchmarkConfig, BenchmarkResult, latency statistics
+                          (no torch dependency)
+    benchmark_pytorch.py  run_pytorch_benchmark() -- imports torch, imported
+                          lazily by the CLI so torch stays optional
+    cli.py               python -m tensorforge_ops track / list-runs / benchmark
     __main__.py
 ```
 
@@ -62,3 +75,21 @@ Open `http://127.0.0.1:5000` in a browser to inspect the run.
 
 See [mlflow-tracking.md](mlflow-tracking.md) for the full parameter/metric/
 tag reference, fingerprint semantics, and comparison workflow.
+
+## Real benchmark quick start
+
+```bash
+pip install -e ".[ops,benchmark]"
+
+python -m tensorforge_ops benchmark \
+    --workload-preset gemm_tiny --accelerator-preset balanced \
+    --tile-m-values 32,64,128 --tile-n-values 32,64,128 --tile-k-values 32,64,128 \
+    --backend pytorch --device cpu --warmup 10 --iterations 50 \
+    --experiment tensorforge-local
+```
+
+This runs the same Core experiment as `track` above, logs the analytical
+result to MLflow, then actually executes the workload in PyTorch and logs
+the measured latency/throughput/memory to the **same** run under
+`measured_*` names. See [benchmarking.md](benchmarking.md) for the full
+methodology.

@@ -6,6 +6,8 @@ requires-python = ">=3.12"
 
 [project.optional-dependencies]
 ops = ["mlflow>=2.20"]
+benchmark = ["torch>=2.4"]
+onnx = ["onnxruntime>=1.18", "torch>=2.4"]
 
 [project.scripts]
 tensorforge-ops = "tensorforge_ops.cli:main"

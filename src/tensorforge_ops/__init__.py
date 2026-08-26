@@ -1,8 +1,17 @@
+from tensorforge_ops.benchmark import (
+    BENCHMARK_SCHEMA_VERSION,
+    BenchmarkConfig,
+    BenchmarkResult,
+    LatencyStatistics,
+    compute_latency_statistics,
+    run_timed_iterations,
+)
 from tensorforge_ops.tracking import (
     TrackedRun,
     TrackingConfig,
     compute_result_fingerprint,
     list_runs,
+    log_benchmark_result,
     resolve_tracking_uri,
     track_experiment,
     track_result,
@@ -13,7 +22,14 @@ __all__ = [
     "TrackingConfig",
     "compute_result_fingerprint",
     "list_runs",
+    "log_benchmark_result",
     "resolve_tracking_uri",
     "track_experiment",
     "track_result",
+    "BENCHMARK_SCHEMA_VERSION",
+    "BenchmarkConfig",
+    "BenchmarkResult",
+    "LatencyStatistics",
+    "compute_latency_statistics",
+    "run_timed_iterations",
 ]

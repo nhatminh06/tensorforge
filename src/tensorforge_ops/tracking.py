@@ -36,6 +36,8 @@ from mlflow.tracking import MlflowClient
 
 from tensorforge.experiments import SCHEMA_VERSION, ExperimentResult, ExperimentSpec, run_experiment
 
+from tensorforge_ops.benchmark import BENCHMARK_SCHEMA_VERSION, BenchmarkResult
+
 DEFAULT_EXPERIMENT_NAME = "tensorforge"
 
 
@@ -247,6 +249,83 @@ def track_experiment(
     """
     result = run_experiment(spec)
     return track_result(result, tracking, run_name=run_name)
+
+
+def _build_benchmark_params(benchmark: BenchmarkResult) -> dict:
+    params = {
+        "benchmark_backend": benchmark.backend,
+        "benchmark_device": benchmark.device,
+        "benchmark_dtype": benchmark.dtype,
+        "warmup_iterations": benchmark.warmup_iterations,
+        "measured_iterations": benchmark.measured_iterations,
+    }
+    # Small, flat runtime metadata (torch/CUDA version, device name, ...) --
+    # never huge machine inventories, never latency samples.
+    for key, value in benchmark.runtime_metadata.items():
+        params[f"runtime_{key}"] = value
+    return params
+
+
+def _build_benchmark_metrics(benchmark: BenchmarkResult) -> dict:
+    stats = benchmark.statistics
+    metrics = {
+        "measured_mean_latency_seconds": stats.mean_seconds,
+        "measured_p50_latency_seconds": stats.p50_seconds,
+        "measured_min_latency_seconds": stats.min_seconds,
+        "measured_max_latency_seconds": stats.max_seconds,
+        "measured_throughput_per_second": stats.throughput_per_second,
+    }
+    # Percentiles below the sample-count threshold are None on the result
+    # (never fabricated) -- and are correspondingly just omitted here,
+    # never logged as a misleading 0.0.
+    if stats.p95_seconds is not None:
+        metrics["measured_p95_latency_seconds"] = stats.p95_seconds
+    if stats.p99_seconds is not None:
+        metrics["measured_p99_latency_seconds"] = stats.p99_seconds
+    if benchmark.peak_memory_allocated_bytes is not None:
+        metrics["measured_peak_memory_allocated_bytes"] = float(benchmark.peak_memory_allocated_bytes)
+    return metrics
+
+
+def _build_benchmark_tags(benchmark: BenchmarkResult) -> dict:
+    return {
+        "tensorforge.measurement": "real",
+        "tensorforge.core_result_fingerprint": benchmark.core_result_fingerprint,
+        "tensorforge.benchmark_schema_version": str(BENCHMARK_SCHEMA_VERSION),
+        "benchmark.backend": benchmark.backend,
+        "benchmark.device_type": benchmark.device.split(":")[0],
+    }
+
+
+def log_benchmark_result(tracking: TrackingConfig, run_id: str, benchmark: BenchmarkResult) -> None:
+    """Attach a measured BenchmarkResult to an existing MLflow run -- by
+    strong preference, the SAME run already created by track_result()/
+    track_experiment() for the analytical Core result this benchmark
+    measures, so predicted and measured metrics sit side by side in one
+    place for easy comparison in the MLflow UI.
+
+    Uses MlflowClient directly (log_param/log_metric/set_tag/log_artifact
+    by run_id) rather than mlflow.start_run(), so an already-closed
+    analytical run can be safely appended to without reopening or
+    altering its existing data. Never mutates or overwrites any
+    predicted_*/analytical metric already logged on that run -- every key
+    here is prefixed measured_/benchmark_/runtime_ to keep the two
+    domains unambiguous.
+    """
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+
+    for key, value in _build_benchmark_params(benchmark).items():
+        client.log_param(run_id, key, value)
+    for key, value in _build_benchmark_metrics(benchmark).items():
+        client.log_metric(run_id, key, value)
+    for key, value in _build_benchmark_tags(benchmark).items():
+        client.set_tag(run_id, key, value)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "benchmark-result.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(benchmark.to_json())
+        client.log_artifact(run_id, path)
 
 
 def list_runs(tracking: TrackingConfig, max_results: int = 20) -> tuple[dict, ...]:
