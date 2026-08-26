@@ -32,6 +32,13 @@ from tensorforge_ops.regression import (
     load_regression_policy,
     render_markdown_report,
 )
+from tensorforge_ops.telemetry import (
+    TelemetryConfig,
+    correlate_telemetry,
+    render_telemetry_markdown_section,
+    summarize_telemetry_trace,
+    telemetry_summary_from_dict,
+)
 from tensorforge_ops.tracking import (
     DEFAULT_EXPERIMENT_NAME,
     TrackingConfig,
@@ -39,6 +46,8 @@ from tensorforge_ops.tracking import (
     list_runs,
     log_benchmark_result,
     log_calibration_profile,
+    log_telemetry,
+    log_telemetry_correlation,
     log_validation_result,
     log_validation_summary,
     resolve_tracking_uri,
@@ -109,7 +118,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run the benchmark without logging to MLflow (prints the summary only).",
     )
     bench.add_argument("--output-json", default=None, help="Path to save the BenchmarkResult JSON.")
-    bench.add_argument("--force", action="store_true", help="Overwrite --output-json if it already exists.")
+    bench.add_argument("--force", action="store_true", help="Overwrite --output-json/--telemetry-output-* if they already exist.")
+    bench.add_argument(
+        "--telemetry", choices=["nvml"], default=None,
+        help="Collect GPU telemetry in a separate phase after latency measurement (requires --device cuda).",
+    )
+    bench.add_argument("--telemetry-duration", type=float, default=5.0)
+    bench.add_argument("--telemetry-sample-interval", type=float, default=0.15)
+    bench.add_argument("--telemetry-output-trace", default=None, help="Path to save the TelemetryTrace JSON.")
+    bench.add_argument("--telemetry-output-summary", default=None, help="Path to save the TelemetrySummary JSON.")
+
+    telemetry_parser = sub.add_parser("telemetry", help="GPU telemetry utilities (device capability probing).")
+    telemetry_sub = telemetry_parser.add_subparsers(dest="telemetry_command", required=True)
+    telemetry_probe = telemetry_sub.add_parser("probe", help="Report which telemetry fields this device/driver actually supports.")
+    telemetry_probe.add_argument("--device-index", type=int, default=0)
 
     calibrate = sub.add_parser(
         "calibrate",
@@ -193,6 +215,15 @@ def _build_parser() -> argparse.ArgumentParser:
     regression.add_argument(
         "--force", action="store_true", help="Overwrite --output-json/--output-markdown if they already exist.",
     )
+    regression.add_argument(
+        "--baseline-telemetry-summary", default=None,
+        help="Optional path to a baseline TelemetrySummary JSON. Diagnostic context only -- never affects PASS/FAIL.",
+    )
+    regression.add_argument(
+        "--candidate-telemetry-summary", default=None,
+        help="Optional path to a candidate TelemetrySummary JSON. Requires --baseline-telemetry-summary too.",
+    )
+    regression.add_argument("--telemetry-output-json", default=None, help="Path to save the TelemetryCorrelationResult JSON.")
 
     return parser
 
@@ -314,11 +345,40 @@ def _run_benchmark(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             "benchmark backend only. Use --backend pytorch."
         )
 
+    # PHASE B: telemetry, strictly after latency measurement (Phase A,
+    # unchanged above) -- never sampled concurrently with the timed loop.
+    if args.telemetry is None and (args.telemetry_output_trace is not None or args.telemetry_output_summary is not None):
+        parser.error("--telemetry-output-trace/--telemetry-output-summary require --telemetry")
+
+    telemetry_trace = None
+    telemetry_summary = None
+    if args.telemetry is not None:
+        if not args.device.startswith("cuda"):
+            parser.error("--telemetry currently requires --device cuda[:N] (NVML observes physical devices only)")
+        device_index = int(args.device.split(":")[1]) if ":" in args.device else 0
+        telemetry_config = TelemetryConfig(
+            backend=args.telemetry, device_index=device_index,
+            sample_interval_seconds=args.telemetry_sample_interval,
+            telemetry_duration_seconds=args.telemetry_duration,
+        )
+        from tensorforge_ops.benchmark_pytorch import run_pytorch_telemetry_window
+        try:
+            telemetry_trace = run_pytorch_telemetry_window(preset, telemetry_config, core_result_fingerprint=fingerprint)
+        except ValueError as exc:
+            parser.error(str(exc))
+        telemetry_summary = summarize_telemetry_trace(telemetry_trace)
+
     if tracking is not None and tracked is not None:
         log_benchmark_result(tracking, tracked.run_id, benchmark_result)
+        if telemetry_trace is not None:
+            log_telemetry(tracking, tracked.run_id, telemetry_trace, telemetry_summary)
 
     if args.output_json is not None:
         _write_output_file(parser, args.output_json, benchmark_result.to_json(), args.force)
+    if args.telemetry_output_trace is not None:
+        _write_output_file(parser, args.telemetry_output_trace, telemetry_trace.to_json(), args.force)
+    if args.telemetry_output_summary is not None:
+        _write_output_file(parser, args.telemetry_output_summary, telemetry_summary.to_json(), args.force)
 
     stats = benchmark_result.statistics
     print("TensorForge Benchmark")
@@ -356,11 +416,69 @@ def _run_benchmark(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         print()
         print(f"Saved to {args.output_json}")
 
+    if telemetry_summary is not None:
+        _print_telemetry_summary(telemetry_trace, telemetry_summary)
+        if args.telemetry_output_trace is not None:
+            print()
+            print(f"Telemetry trace saved to {args.telemetry_output_trace}")
+        if args.telemetry_output_summary is not None:
+            print(f"Telemetry summary saved to {args.telemetry_output_summary}")
+
     if tracked is not None:
         print()
         print("MLflow")
         print(f"  experiment                 {tracked.experiment_name}")
         print(f"  run id                     {tracked.run_id}")
+
+
+def _print_telemetry_summary(trace, summary) -> None:
+    print()
+    print("GPU telemetry")
+    print()
+    print(f"  backend                 {trace.backend.upper()}")
+    print(f"  samples                 {summary.sample_count}")
+    print(f"  duration                {summary.duration_seconds:.1f} s")
+    print()
+
+    print("  GPU activity")
+    print(f"    mean                  {summary.gpu_utilization_percent.mean:.0f}%" if summary.gpu_utilization_percent.sample_count else "    mean                  n/a")
+    print(f"    max                   {summary.gpu_utilization_percent.max:.0f}%" if summary.gpu_utilization_percent.sample_count else "    max                   n/a")
+    print()
+    print("  memory activity")
+    print(f"    mean                  {summary.memory_activity_percent.mean:.0f}%" if summary.memory_activity_percent.sample_count else "    mean                  n/a")
+    print(f"    max                   {summary.memory_activity_percent.max:.0f}%" if summary.memory_activity_percent.sample_count else "    max                   n/a")
+    print()
+    print("  VRAM used")
+    if summary.memory_used_bytes.sample_count:
+        print(f"    max                   {summary.memory_used_bytes.max / (1024 * 1024):.0f} MiB")
+    else:
+        print("    max                   n/a")
+    print()
+    print("  power")
+    if summary.power_watts.sample_count:
+        print(f"    mean                  {summary.power_watts.mean:.1f} W")
+        print(f"    max                   {summary.power_watts.max:.1f} W")
+    else:
+        print("    mean                  n/a (not supported on this device)")
+    print()
+    print("  temperature")
+    if summary.temperature_celsius.sample_count:
+        print(f"    max                   {summary.temperature_celsius.max:.0f} C")
+    else:
+        print("    max                   n/a")
+    print()
+    print("  SM clock")
+    if summary.sm_clock_mhz.sample_count:
+        print(f"    mean                  {summary.sm_clock_mhz.mean:.0f} MHz")
+        print(f"    min                   {summary.sm_clock_mhz.min:.0f} MHz")
+    else:
+        print("    mean                  n/a")
+    if summary.throttle_reasons_observed:
+        print()
+        print(f"  throttle reasons observed: {', '.join(summary.throttle_reasons_observed)}")
+    if summary.unavailable_metrics:
+        print()
+        print(f"  unavailable metrics: {', '.join(summary.unavailable_metrics)}")
 
 
 def _format_signed_seconds(seconds: float) -> str:
@@ -675,6 +793,28 @@ def _run_regression(parser: argparse.ArgumentParser, args: argparse.Namespace) -
     result = compare_benchmark_results(baseline, candidate, policy)
     report = render_markdown_report(result)
 
+    # Optional telemetry context (Milestone 15): diagnostic only, appended
+    # to the report, and NEVER read by compare_benchmark_results() above --
+    # the PASS/FAIL/ERROR decision is already final by this point.
+    correlation = None
+    if args.candidate_telemetry_summary is not None and args.baseline_telemetry_summary is None:
+        print("error: --candidate-telemetry-summary requires --baseline-telemetry-summary", file=sys.stderr)
+        return 1
+    if args.baseline_telemetry_summary is not None and args.candidate_telemetry_summary is not None:
+        try:
+            with open(args.baseline_telemetry_summary, encoding="utf-8") as f:
+                baseline_telemetry_summary = telemetry_summary_from_dict(json.load(f))
+            with open(args.candidate_telemetry_summary, encoding="utf-8") as f:
+                candidate_telemetry_summary = telemetry_summary_from_dict(json.load(f))
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"error: could not load telemetry summary: {exc}", file=sys.stderr)
+            return 1
+        correlation = correlate_telemetry(
+            baseline_telemetry_summary, candidate_telemetry_summary,
+            regression_status=result.status, workload_preset=result.workload_preset, workload_kind=result.workload_kind,
+        )
+        report = report + "\n" + render_telemetry_markdown_section(correlation)
+
     # Deliberately NOT _write_output_file()/parser.error() here: argparse
     # always exits 2, which would collide with this command's own "2 ==
     # regression FAIL" convention. An overwrite-protection violation is an
@@ -687,6 +827,13 @@ def _run_regression(parser: argparse.ArgumentParser, args: argparse.Namespace) -
             return 1
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
+
+    if correlation is not None and args.telemetry_output_json is not None:
+        if os.path.exists(args.telemetry_output_json) and not args.force:
+            print(f"error: {args.telemetry_output_json} already exists; pass --force to overwrite", file=sys.stderr)
+            return 1
+        with open(args.telemetry_output_json, "w", encoding="utf-8") as f:
+            f.write(correlation.to_json())
 
     print("TensorForge Performance Regression Guard")
     print()
@@ -711,10 +858,57 @@ def _run_regression(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         print(f"  {base} -> {candidate_str} ({change})  [{c.status}]")
     print()
 
+    if correlation is not None:
+        print("GPU telemetry context (diagnostic only, does not affect PASS/FAIL):")
+        if correlation.signals:
+            for s in correlation.signals:
+                print(f"  - {s}")
+        else:
+            print("  no material telemetry signals observed")
+        print()
+
     if args.output_markdown is not None:
         print(f"Report: {args.output_markdown}")
 
     return 2 if result.status == STATUS_FAIL else 0
+
+
+def _run_telemetry_probe(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from tensorforge_ops.telemetry_nvml import NvmlUnavailableError, probe_capabilities
+
+    try:
+        report = probe_capabilities(args.device_index)
+    except NvmlUnavailableError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print("TensorForge GPU Telemetry Probe")
+    print()
+    print("Backend: NVML")
+    print(f"Device: {report['device_name']} (index {report['device_index']})")
+    driver_version = report["runtime_metadata"].get("nvml_driver_version", "unknown")
+    print(f"Driver: {driver_version}")
+    gpm = report["runtime_metadata"].get("gpm_supported")
+    print(f"GPM (advanced SM/tensor/DRAM activity metrics) supported: {gpm}")
+    print()
+
+    available = [k for k, v in report["capabilities"].items() if v]
+    unavailable = [k for k, v in report["capabilities"].items() if not v]
+    print("Available:")
+    for k in available:
+        print(f"  {k}")
+    print()
+    print("Unavailable:")
+    for k in unavailable:
+        print(f"  {k}")
+    return 0
+
+
+def _run_telemetry(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    if args.telemetry_command == "probe":
+        return _run_telemetry_probe(parser, args)
+    parser.error(f"unknown telemetry command {args.telemetry_command!r}")
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -735,6 +929,8 @@ def main(argv: list[str] | None = None) -> int:
         _run_validate_suite(parser, args)
     elif args.command == "regression":
         return _run_regression(parser, args)
+    elif args.command == "telemetry":
+        return _run_telemetry(parser, args)
     return 0
 
 

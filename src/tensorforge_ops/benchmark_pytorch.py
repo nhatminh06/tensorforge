@@ -204,3 +204,50 @@ def run_pytorch_benchmark(
         peak_memory_allocated_bytes=_peak_memory_allocated(device),
         runtime_metadata=_runtime_metadata(device),
     )
+
+
+def run_pytorch_telemetry_window(
+    preset: WorkloadPreset,
+    telemetry_config,
+    core_result_fingerprint: str | None = None,
+):
+    """PHASE B (see telemetry.py's module docstring): collect NVML
+    telemetry while repeatedly executing the SAME workload construction
+    `run_pytorch_benchmark` uses for latency measurement -- same preset,
+    device, dtype -- reusing the identical `_build_*_callable` helpers so
+    telemetry and latency measurement can never silently drift apart.
+    Never measures or returns latency; that remains run_pytorch_benchmark's
+    job, run in a separate phase before or after this one.
+
+    `telemetry_config.device_index` selects the CUDA device -- NVML (the
+    telemetry backend) only observes physical devices, so this always
+    targets `cuda:{device_index}`, independent of whatever device string
+    the latency benchmark used.
+    """
+    from tensorforge_ops.telemetry_nvml import run_telemetry_window
+
+    if not torch.cuda.is_available():
+        raise ValueError(
+            f"telemetry device 'cuda:{telemetry_config.device_index}' was requested but "
+            "torch.cuda.is_available() is False"
+        )
+    device = torch.device(f"cuda:{telemetry_config.device_index}")
+    torch_dtype = _resolve_dtype(preset.dtype)
+
+    if preset.kind == "gemm":
+        fn = _build_gemm_callable(preset, device, torch_dtype)
+    elif preset.kind == "conv2d":
+        fn = _build_conv_callable(preset, device, torch_dtype)
+    elif preset.kind == "transformer":
+        fn = _build_transformer_gemm_callable(preset, device, torch_dtype)
+    else:
+        raise ValueError(_UNSUPPORTED_KIND_MESSAGE.format(kind=preset.kind))
+
+    sync_fn = _sync_fn_for(device)
+    with torch.inference_mode():
+        return run_telemetry_window(
+            fn, telemetry_config, sync_fn=sync_fn,
+            workload_preset=preset.name, workload_kind=preset.kind,
+            benchmark_backend="pytorch", dtype=preset.dtype.name.lower(),
+            core_result_fingerprint=core_result_fingerprint,
+        )

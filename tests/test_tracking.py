@@ -15,12 +15,21 @@ from tensorforge_ops.calibration import (
     summarize_validation_results,
     validate_prediction,
 )
+from tensorforge_ops.telemetry import (
+    TelemetryConfig,
+    TelemetrySample,
+    TelemetryTrace,
+    correlate_telemetry,
+    summarize_telemetry_trace,
+)
 from tensorforge_ops.tracking import (
     TrackingConfig,
     compute_result_fingerprint,
     list_runs,
     log_benchmark_result,
     log_calibration_profile,
+    log_telemetry,
+    log_telemetry_correlation,
     log_validation_result,
     log_validation_summary,
     resolve_tracking_uri,
@@ -476,6 +485,91 @@ def test_log_validation_summary_creates_its_own_run(tmp_path):
     local_path = client.download_artifacts(run_id, "validation-summary.json", str(tmp_path))
     with open(local_path, encoding="utf-8") as f:
         assert f.read() == summary.to_json()
+
+
+# --- attaching telemetry / telemetry correlation to an already-tracked run -------
+
+def make_telemetry_trace(gpu_values=(60.0, 70.0, 80.0), power_watts=None):
+    samples = tuple(
+        TelemetrySample(
+            timestamp_seconds=i * 0.15, gpu_utilization_percent=v, memory_activity_percent=10.0,
+            memory_used_bytes=1_000_000, memory_free_bytes=3_000_000, memory_total_bytes=4_000_000,
+            power_watts=power_watts, temperature_celsius=60.0, sm_clock_mhz=1500, memory_clock_mhz=6001,
+            performance_state=0, clock_event_reasons_bitmask=0, clock_event_reasons=(),
+        )
+        for i, v in enumerate(gpu_values)
+    )
+    return TelemetryTrace(
+        telemetry_schema_version=1, backend="nvml", device_index=0, device_name="Fake GPU",
+        sample_interval_seconds=0.15, requested_duration_seconds=0.45, actual_duration_seconds=0.46,
+        samples=samples, workload_preset="gemm_tiny", workload_kind="gemm", benchmark_backend="pytorch",
+        dtype="fp16", core_result_fingerprint="sha256:" + "0" * 64, runtime_metadata={"nvml_driver_version": "610.43.03"},
+    )
+
+
+def test_log_telemetry_attaches_metrics_and_artifacts(tmp_path):
+    tracking = tracking_config(tmp_path)
+    result = run_experiment(make_spec())
+    tracked = track_result(result, tracking)
+
+    trace = make_telemetry_trace()
+    summary = summarize_telemetry_trace(trace)
+    log_telemetry(tracking, tracked.run_id, trace, summary)
+
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    run = client.get_run(tracked.run_id)
+    assert run.data.metrics["telemetry_gpu_util_percent_mean"] == pytest.approx(70.0)
+    assert run.data.metrics["telemetry_gpu_util_percent_max"] == pytest.approx(80.0)
+    assert run.data.tags["tensorforge.telemetry"] == "nvml"
+    # unavailable metric (power) never logged as 0
+    assert "telemetry_power_watts_mean" not in run.data.metrics
+    # analytical metrics from track_result() are untouched
+    assert "perfect_overlap_time_seconds" in run.data.metrics
+
+    trace_path = client.download_artifacts(tracked.run_id, "telemetry-trace.json", str(tmp_path))
+    with open(trace_path, encoding="utf-8") as f:
+        assert f.read() == trace.to_json()
+    summary_path = client.download_artifacts(tracked.run_id, "telemetry-summary.json", str(tmp_path))
+    with open(summary_path, encoding="utf-8") as f:
+        assert f.read() == summary.to_json()
+
+
+def test_log_telemetry_logs_available_advanced_metrics_tag_correctly(tmp_path):
+    tracking = tracking_config(tmp_path)
+    result = run_experiment(make_spec())
+    tracked = track_result(result, tracking)
+
+    trace = make_telemetry_trace()
+    summary = summarize_telemetry_trace(trace)
+    log_telemetry(tracking, tracked.run_id, trace, summary)
+
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    run = client.get_run(tracked.run_id)
+    # this fixture never sets sm_activity/tensor_activity/etc -- unavailable
+    assert run.data.tags["tensorforge.telemetry_advanced_metrics"] == "unavailable"
+
+
+def test_log_telemetry_correlation_attaches_artifact_and_tags(tmp_path):
+    tracking = tracking_config(tmp_path)
+    result = run_experiment(make_spec())
+    tracked = track_result(result, tracking)
+
+    baseline_summary = summarize_telemetry_trace(make_telemetry_trace(gpu_values=(90.0, 90.0)))
+    candidate_summary = summarize_telemetry_trace(make_telemetry_trace(gpu_values=(50.0, 50.0)))
+    correlation = correlate_telemetry(baseline_summary, candidate_summary, regression_status="FAIL", workload_preset="gemm_tiny", workload_kind="gemm")
+
+    log_telemetry_correlation(tracking, tracked.run_id, correlation)
+
+    client = MlflowClient(tracking_uri=tracking.tracking_uri)
+    run = client.get_run(tracked.run_id)
+    assert run.data.tags["tensorforge.telemetry_correlation"] == "diagnostic-context"
+    assert int(run.data.tags["tensorforge.telemetry_signal_count"]) >= 1
+    # regression status/metrics on the run remain whatever track_result() set --
+    # this function never touches Milestone-14 regression fields.
+
+    local_path = client.download_artifacts(tracked.run_id, "telemetry-correlation.json", str(tmp_path))
+    with open(local_path, encoding="utf-8") as f:
+        assert f.read() == correlation.to_json()
 
 
 # --- Core boundary: no MLflow import anywhere under src/tensorforge/ --------------
