@@ -39,6 +39,14 @@ from tensorforge_ops.telemetry import (
     summarize_telemetry_trace,
     telemetry_summary_from_dict,
 )
+from tensorforge_ops.sizing import (
+    PLAN_STATUS_ERROR,
+    STATUS_FEASIBLE,
+    build_sizing_plan,
+    load_deployment_catalog,
+    load_slo_policy,
+    render_sizing_markdown_report,
+)
 from tensorforge_ops.tracking import (
     DEFAULT_EXPERIMENT_NAME,
     TrackingConfig,
@@ -48,6 +56,7 @@ from tensorforge_ops.tracking import (
     log_calibration_profile,
     log_telemetry,
     log_telemetry_correlation,
+    log_sizing_plan,
     log_validation_result,
     log_validation_summary,
     resolve_tracking_uri,
@@ -224,6 +233,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional path to a candidate TelemetrySummary JSON. Requires --baseline-telemetry-summary too.",
     )
     regression.add_argument("--telemetry-output-json", default=None, help="Path to save the TelemetryCorrelationResult JSON.")
+
+    right_size = sub.add_parser(
+        "right-size",
+        help="Determine the cheapest measured deployment candidate that satisfies an explicit SLO.",
+    )
+    right_size.add_argument("--catalog", required=True, help="Path to a DeploymentCatalog JSON.")
+    right_size.add_argument("--slo", required=True, help="Path to a SloPolicy JSON.")
+    right_size.add_argument("--output-json", default=None, help="Path to save the SizingPlanResult JSON.")
+    right_size.add_argument("--output-markdown", default=None, help="Path to save the Markdown report.")
+    right_size.add_argument(
+        "--force", action="store_true", help="Overwrite --output-json/--output-markdown if they already exist.",
+    )
+    right_size.add_argument("--tracking-uri", default=None)
+    right_size.add_argument("--experiment", default=DEFAULT_EXPERIMENT_NAME)
+    right_size.add_argument("--run-name", default=None)
+    right_size.add_argument(
+        "--track", action="store_true",
+        help="Log the sizing plan to MLflow as its own run (off by default -- the planner works fully offline).",
+    )
 
     return parser
 
@@ -873,6 +901,82 @@ def _run_regression(parser: argparse.ArgumentParser, args: argparse.Namespace) -
     return 2 if result.status == STATUS_FAIL else 0
 
 
+def _run_right_size(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Exit-code contract (mirrors the `regression` command's spirit,
+    but is a distinct contract for a distinct concern -- deployment
+    planning, not PR performance gating):
+        0 -> plan calculated, at least one feasible candidate exists
+        1 -> configuration/operational error (bad catalog/SLO, mismatched
+             workload/backend/dtype across candidates)
+        2 -> valid plan, but no supplied candidate satisfies the SLO
+    """
+    try:
+        catalog = load_deployment_catalog(args.catalog)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"error: could not load --catalog {args.catalog!r}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        slo = load_slo_policy(args.slo)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"error: could not load --slo {args.slo!r}: {exc}", file=sys.stderr)
+        return 1
+
+    plan = build_sizing_plan(catalog, slo)
+    report = render_sizing_markdown_report(plan)
+
+    for path, text in ((args.output_json, plan.to_json()), (args.output_markdown, report)):
+        if path is None:
+            continue
+        if os.path.exists(path) and not args.force:
+            print(f"error: {path} already exists; pass --force to overwrite", file=sys.stderr)
+            return 1
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    print("TensorForge Right-Sizing Plan")
+    print()
+
+    if plan.status == PLAN_STATUS_ERROR:
+        print("Status: ERROR")
+        print()
+        print(plan.error_message)
+        return 1
+
+    print(f"Workload: {plan.workload_preset} ({plan.workload_kind}, {plan.backend}, {plan.dtype})")
+    print(f"Demand: {plan.required_invocations_per_second:g} invocations/sec")
+    print(
+        f"SLO: p95 <= {_format_seconds(plan.max_p95_latency_seconds)}, "
+        f"capacity headroom = {plan.capacity_headroom_fraction * 100:.0f}%"
+    )
+    print()
+    for c in plan.candidate_plans:
+        status = c.status if not c.reasons else f"{c.status} ({', '.join(c.reasons)})"
+        replicas = c.required_replicas if c.required_replicas is not None else "--"
+        hourly = f"{c.total_hourly_cost:.2f} {plan.currency}" if c.total_hourly_cost is not None else "--"
+        print(f"{c.candidate_id}: {status}  replicas={replicas}  hourly={hourly}")
+    print()
+
+    if plan.recommended_candidate_id is not None:
+        print(f"Recommended: {plan.recommended_candidate_id}")
+    else:
+        print("Recommended: NO FEASIBLE CANDIDATE")
+
+    if args.track:
+        tracking_uri = resolve_tracking_uri(args.tracking_uri)
+        tracking = TrackingConfig(tracking_uri=tracking_uri, experiment_name=args.experiment)
+        run_id = log_sizing_plan(tracking, plan, report_markdown=report, run_name=args.run_name)
+        print()
+        print("MLflow")
+        print(f"  experiment                 {tracking.experiment_name}")
+        print(f"  run id                     {run_id}")
+
+    if args.output_markdown is not None:
+        print()
+        print(f"Report: {args.output_markdown}")
+
+    return 0 if plan.recommended_candidate_id is not None else 2
+
+
 def _run_telemetry_probe(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     from tensorforge_ops.telemetry_nvml import NvmlUnavailableError, probe_capabilities
 
@@ -931,6 +1035,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_regression(parser, args)
     elif args.command == "telemetry":
         return _run_telemetry(parser, args)
+    elif args.command == "right-size":
+        return _run_right_size(parser, args)
     return 0
 
 

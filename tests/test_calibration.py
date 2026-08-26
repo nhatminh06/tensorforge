@@ -23,6 +23,7 @@ from tensorforge_ops.calibration import (
     predict,
     summarize_validation_results,
     validate_prediction,
+    validation_result_from_dict,
 )
 
 
@@ -309,3 +310,9 @@ def test_summarize_validation_results_groups_by_kind_and_bottleneck():
 def test_summarize_validation_results_rejects_empty():
     with pytest.raises(ValueError):
         summarize_validation_results(())
+
+
+def test_validation_result_from_dict_roundtrip():
+    result = make_validation_result(0.020, 0.025)
+    restored = validation_result_from_dict(json.loads(result.to_json()))
+    assert restored.to_json() == result.to_json()

@@ -16,6 +16,7 @@ from tensorforge_ops.telemetry import (
     low_utilization_note,
     render_telemetry_markdown_section,
     summarize_telemetry_trace,
+    load_telemetry_summary,
     telemetry_sample_from_dict,
     telemetry_summary_from_dict,
     telemetry_trace_from_dict,
@@ -161,6 +162,15 @@ def test_summary_roundtrip():
     summary = summarize_telemetry_trace(trace)
     restored = telemetry_summary_from_dict(json.loads(summary.to_json()))
     assert restored.to_json() == summary.to_json()
+
+
+def test_load_telemetry_summary_from_file(tmp_path):
+    trace = make_trace([make_sample(t=0.0), make_sample(t=0.15, gpu=90.0)])
+    summary = summarize_telemetry_trace(trace)
+    path = tmp_path / "telemetry-summary.json"
+    path.write_text(summary.to_json())
+    loaded = load_telemetry_summary(str(path))
+    assert loaded.to_json() == summary.to_json()
 
 
 def test_throttle_reasons_observed_union_across_samples():
