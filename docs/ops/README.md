@@ -36,22 +36,40 @@ its full test suite with no MLflow installed at all.
   throughput, and (on CUDA) peak allocated memory, attached to the same
   MLflow run as the analytical result under explicit `measured_*` field
   names — see [benchmarking.md](benchmarking.md). This is not a
-  prediction-accuracy comparison (that is a later milestone) and does not
-  include an ONNX Runtime backend yet (DEFERRED, see that doc).
+  prediction-accuracy comparison (that was this next milestone) and does
+  not include an ONNX Runtime backend yet (DEFERRED, see that doc).
+- **Milestone 13** added **physical-device calibration and
+  prediction-vs-measurement validation**
+  (`tensorforge_ops.calibration`/`calibration_pytorch`): a dedicated
+  compute probe and memory-copy probe measure this device's real
+  sustained compute rate and memory bandwidth (never a fake mapping of
+  GPU cores to TensorForge PEs), an "empirical roofline prediction" is
+  built from those rates plus each workload's existing Core FLOPs/
+  baseline-DRAM-bytes properties, and that prediction is compared against
+  Milestone 12's measured p50 latency — see
+  [calibration.md](calibration.md) and [validation.md](validation.md).
+  This still does not add regression gating, GPU telemetry, or hardware
+  cost modeling (all later milestones).
 
 ## Package layout
 
 ```
 src/tensorforge_ops/
-    __init__.py         public exports
-    tracking.py          TrackingConfig, TrackedRun, compute_result_fingerprint(),
-                          track_result(), track_experiment(), list_runs(),
-                          log_benchmark_result()
-    benchmark.py          BenchmarkConfig, BenchmarkResult, latency statistics
-                          (no torch dependency)
-    benchmark_pytorch.py  run_pytorch_benchmark() -- imports torch, imported
-                          lazily by the CLI so torch stays optional
-    cli.py               python -m tensorforge_ops track / list-runs / benchmark
+    __init__.py           public exports
+    tracking.py            TrackingConfig, TrackedRun, compute_result_fingerprint(),
+                            track_result(), track_experiment(), list_runs(),
+                            log_benchmark_result(), log_calibration_profile(),
+                            log_validation_result(), log_validation_summary()
+    benchmark.py            BenchmarkConfig, BenchmarkResult, latency statistics
+                            (no torch dependency)
+    benchmark_pytorch.py    run_pytorch_benchmark() -- imports torch, imported
+                            lazily by the CLI so torch stays optional
+    calibration.py          CalibrationConfig, DeviceCalibrationProfile, predict(),
+                            validate_prediction(), ValidationSummary (no torch dependency)
+    calibration_pytorch.py  run_pytorch_calibration() -- imports torch, imported
+                            lazily by the CLI
+    cli.py                 python -m tensorforge_ops track / list-runs / benchmark /
+                            calibrate / validate / validate-suite
     __main__.py
 ```
 
@@ -93,3 +111,48 @@ result to MLflow, then actually executes the workload in PyTorch and logs
 the measured latency/throughput/memory to the **same** run under
 `measured_*` names. See [benchmarking.md](benchmarking.md) for the full
 methodology.
+
+## Calibration + validation quick start
+
+```bash
+python -m tensorforge_ops calibrate \
+    --backend pytorch --device cuda --dtype fp16 \
+    --compute-m 2048 --compute-n 2048 --compute-k 2048 --memory-probe-mib 64 \
+    --output calibration.json
+
+python -m tensorforge_ops validate \
+    --calibration calibration.json \
+    --workload-preset gemm_large_square --accelerator-preset balanced \
+    --tile-m-values 32,64,128 --tile-n-values 32,64,128 --tile-k-values 32,64,128 \
+    --backend pytorch --device cuda \
+    --experiment tensorforge-local
+```
+
+`calibrate` measures this device's real sustained compute/memory rates
+(never a fake TensorForge-PE mapping of a physical GPU). `validate` runs
+the Core experiment, runs the real benchmark, builds an empirical
+roofline prediction from the calibration profile, and compares it against
+the measured p50 latency -- logging `core-result.json`,
+`benchmark-result.json`, `calibration-profile.json`, and
+`validation-result.json` to the same MLflow run. `validate-suite` runs
+this across several workload presets and prints/saves a grouped error
+summary. See [calibration.md](calibration.md) and
+[validation.md](validation.md) for the full methodology, including why
+this is not a hardware-accurate or pass/fail-graded prediction.
+
+## Current end-to-end flow
+
+```
+Core analytical result
+      |
+   MLflow (Milestone 11)
+      |
+real benchmark (Milestone 12)
+      |
+device calibration (Milestone 13)
+      |
+prediction-vs-measurement validation (Milestone 13)
+```
+
+Regression gating on top of this validation is a future milestone, not
+yet implemented.
