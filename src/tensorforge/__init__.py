@@ -12,6 +12,7 @@ from tensorforge.tiling import (
     compare_schedules,
 )
 from tensorforge.timing import ExecutionTimingResult, TimingConfig, estimate_execution_time
+from tensorforge.explore import CandidateConfig, CandidateResult, ExplorationResult, explore
 
 __all__ = [
     "DType",
@@ -34,4 +35,8 @@ __all__ = [
     "ExecutionTimingResult",
     "TimingConfig",
     "estimate_execution_time",
+    "CandidateConfig",
+    "CandidateResult",
+    "ExplorationResult",
+    "explore",
 ]

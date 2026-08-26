@@ -14,6 +14,7 @@ from tensorforge.pe_array import PeArray, map_gemm
 from tensorforge.roofline import compute_roofline
 from tensorforge.tiling import GemmSchedule, GemmTile, analyze_tiling, compare_schedules
 from tensorforge.timing import TimingConfig, estimate_execution_time
+from tensorforge.explore import explore
 
 _DTYPE_CHOICES = {"fp32": DType.FP32, "fp16": DType.FP16, "int8": DType.INT8}
 _SCHEDULE_CHOICES = {
@@ -40,6 +41,17 @@ def _format_seconds(seconds: float) -> str:
     if seconds < 1:
         return f"{seconds * 1e3:.2f} ms"
     return f"{seconds:.2f} s"
+
+
+def _parse_int_list(parser: argparse.ArgumentParser, flag: str, raw: str) -> list[int]:
+    values = []
+    for piece in raw.split(","):
+        piece = piece.strip()
+        try:
+            values.append(int(piece))
+        except ValueError:
+            parser.error(f"{flag}: could not parse {piece!r} as an int")
+    return values
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -83,7 +95,163 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Modeled PE clock frequency in GHz (1 GHz = 1e9 Hz), decimal.",
     )
+    parser.add_argument("--explore", action="store_true")
+    parser.add_argument("--tile-m-values", default=None, help="Comma-separated ints, e.g. 16,32,64")
+    parser.add_argument("--tile-n-values", default=None, help="Comma-separated ints, e.g. 16,32,64")
+    parser.add_argument("--tile-k-values", default=None, help="Comma-separated ints, e.g. 16,32")
+    parser.add_argument("--pe-row-values", default=None, help="Comma-separated ints, e.g. 8,16,32")
+    parser.add_argument("--pe-col-values", default=None, help="Comma-separated ints, e.g. 8,16,32")
+    parser.add_argument(
+        "--schedule-values",
+        default=None,
+        help="Comma-separated schedule names (default: all three, c-resident,a-resident,b-resident)",
+    )
+    parser.add_argument("--top-k", type=int, default=5)
     return parser
+
+
+def _explain_winner(ranked, best) -> list[str]:
+    """Deterministic, metric-based bullet points comparing the winner to a
+    few directly relevant candidates already present in the ranked list.
+    No free-text generation — only comparisons of actual field values.
+    """
+    lines = []
+    bc, bt = best.candidate, best.timing_result
+
+    if len(ranked) > 1:
+        runner_up = ranked[1]
+        if runner_up.timing_result.perfect_overlap_time_seconds == bt.perfect_overlap_time_seconds:
+            lines.append("ties with the next-ranked candidate on perfect-overlap time")
+        else:
+            lines.append(
+                f"beats the next-ranked candidate ({runner_up.candidate.tile_m}x"
+                f"{runner_up.candidate.tile_n}x{runner_up.candidate.tile_k}, "
+                f"{runner_up.candidate.schedule.value}, "
+                f"{runner_up.candidate.pe_rows}x{runner_up.candidate.pe_cols}) by "
+                f"{_format_seconds(runner_up.timing_result.perfect_overlap_time_seconds - bt.perfect_overlap_time_seconds)}"
+            )
+
+    smaller_pe = [
+        r for r in ranked
+        if r.candidate.tile_m == bc.tile_m and r.candidate.tile_n == bc.tile_n
+        and r.candidate.tile_k == bc.tile_k and r.candidate.schedule == bc.schedule
+        and r.candidate.pe_rows * r.candidate.pe_cols < bc.pe_rows * bc.pe_cols
+    ]
+    if smaller_pe:
+        smaller_pe.sort(key=lambda r: r.candidate.pe_rows * r.candidate.pe_cols, reverse=True)
+        alt = smaller_pe[0]
+        if alt.timing_result.perfect_overlap_time_seconds == bt.perfect_overlap_time_seconds:
+            lines.append(
+                f"a smaller PE array ({alt.candidate.pe_rows}x{alt.candidate.pe_cols}) with the "
+                "same tile/schedule ties this perfect-overlap time (already memory-bound here)"
+            )
+        else:
+            lines.append(
+                f"a smaller PE array ({alt.candidate.pe_rows}x{alt.candidate.pe_cols}) with the "
+                f"same tile/schedule would raise perfect-overlap time to "
+                f"{_format_seconds(alt.timing_result.perfect_overlap_time_seconds)}"
+            )
+
+    other_schedule = [
+        r for r in ranked
+        if r.candidate.tile_m == bc.tile_m and r.candidate.tile_n == bc.tile_n
+        and r.candidate.tile_k == bc.tile_k and r.candidate.pe_rows == bc.pe_rows
+        and r.candidate.pe_cols == bc.pe_cols and r.candidate.schedule != bc.schedule
+    ]
+    if other_schedule:
+        other_schedule.sort(key=lambda r: r.timing_result.dram_bytes)
+        alt = other_schedule[0]
+        if alt.timing_result.dram_bytes != bt.dram_bytes:
+            lines.append(
+                f"same tile/PE with {alt.candidate.schedule.value} moves "
+                f"{_format_bytes(alt.timing_result.dram_bytes)} of DRAM traffic "
+                f"({_format_bytes(alt.timing_result.dram_bytes - bt.dram_bytes)} more than the winner)"
+            )
+
+    return lines
+
+
+def _run_explore(parser: argparse.ArgumentParser, args, gemm: Gemm, hardware: HardwareConfig) -> None:
+    tile_m_values = _parse_int_list(parser, "--tile-m-values", args.tile_m_values)
+    tile_n_values = _parse_int_list(parser, "--tile-n-values", args.tile_n_values)
+    tile_k_values = _parse_int_list(parser, "--tile-k-values", args.tile_k_values)
+    pe_row_values = _parse_int_list(parser, "--pe-row-values", args.pe_row_values)
+    pe_col_values = _parse_int_list(parser, "--pe-col-values", args.pe_col_values)
+
+    schedules = None
+    if args.schedule_values is not None:
+        schedules = []
+        for name in args.schedule_values.split(","):
+            name = name.strip()
+            if name not in _SCHEDULE_CHOICES:
+                parser.error(f"--schedule-values: unknown schedule {name!r}")
+            schedules.append(_SCHEDULE_CHOICES[name])
+
+    try:
+        sram_bytes = round(args.sram_kib * _KIB)
+        hierarchy = MemoryHierarchy(sram_bytes=sram_bytes)
+        timing_config = TimingConfig(clock_hz=args.clock_ghz * 1e9)
+        exploration = explore(
+            gemm, hierarchy, hardware, timing_config,
+            tile_m_values=tile_m_values, tile_n_values=tile_n_values, tile_k_values=tile_k_values,
+            pe_rows_values=pe_row_values, pe_cols_values=pe_col_values,
+            schedules=schedules, top_k=args.top_k,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    print(f"Workload: GEMM {gemm.m} x {gemm.n} x {gemm.k} ({args.dtype})")
+    print()
+    print("Exploration (bounded, deterministic search over user-supplied candidates)")
+    print(f"  total candidates        {exploration.total_candidates:,}")
+    print(f"  feasible candidates     {exploration.feasible_candidates:,}")
+    print(f"  infeasible candidates   {exploration.infeasible_candidates:,}")
+    print("  objective               perfect-overlap time (ascending)")
+
+    if exploration.feasible_candidates == 0:
+        print()
+        print("No feasible configurations: every candidate tile exceeded the modeled SRAM capacity.")
+        return
+
+    top = exploration.ranked[: exploration.top_k]
+    print()
+    print(f"Top {len(top)} configurations (of {exploration.feasible_candidates} feasible)")
+    for i, r in enumerate(top, start=1):
+        c, t = r.candidate, r.timing_result
+        print()
+        print(f"#{i}")
+        print(f"  tile                    {c.tile_m} x {c.tile_n} x {c.tile_k}")
+        print(f"  schedule                {c.schedule.value}")
+        print(f"  PE array                {c.pe_rows} x {c.pe_cols}")
+        print(f"  tile working set        {_format_bytes(r.tiling_result.max_tile_working_set_bytes)}")
+        print(f"  compute cycles          {t.compute_cycles:,}")
+        print(f"  compute time            {_format_seconds(t.compute_time_seconds)}")
+        print(f"  DRAM traffic            {_format_bytes(t.dram_bytes)}")
+        print(f"  memory time             {_format_seconds(t.memory_time_seconds)}")
+        print(f"  perfect-overlap         {_format_seconds(t.perfect_overlap_time_seconds)}")
+        print(f"  serialized              {_format_seconds(t.serialized_time_seconds)}")
+        print(f"  bottleneck              {t.bottleneck}")
+        print(
+            f"  effective arithmetic intensity {r.tiling_result.effective_arithmetic_intensity:.4f} FLOP/byte"
+        )
+
+    if exploration.tied_for_best > 1:
+        print()
+        print(f"Note: {exploration.tied_for_best} feasible candidates tie on perfect-overlap time.")
+
+    best = exploration.ranked[0]
+    bc = best.candidate
+    print()
+    print(
+        f"Best among searched candidates: tile {bc.tile_m}x{bc.tile_n}x{bc.tile_k}, "
+        f"{bc.schedule.value}, PE {bc.pe_rows}x{bc.pe_cols}"
+    )
+    explanation = _explain_winner(list(exploration.ranked), best)
+    if explanation:
+        print()
+        print("Why:")
+        for line in explanation:
+            print(f"  - {line}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -107,7 +275,7 @@ def main(argv: list[str] | None = None) -> None:
                 "--tile-k, and --sram-kib"
             )
 
-    if args.clock_ghz is not None:
+    if args.clock_ghz is not None and not args.explore:
         if args.pe_rows is None or any(t is None for t in tile_args) or args.sram_kib is None:
             parser.error(
                 "--clock-ghz requires --pe-rows/--pe-cols, --tile-m/--tile-n/--tile-k, "
@@ -118,12 +286,43 @@ def main(argv: list[str] | None = None) -> None:
         if args.clock_ghz <= 0:
             parser.error("--clock-ghz must be > 0")
 
+    if args.explore and args.clock_ghz is not None and args.clock_ghz <= 0:
+        parser.error("--clock-ghz must be > 0")
+
+    if args.explore:
+        if any(t is not None for t in tile_args):
+            parser.error("--explore cannot be combined with --tile-m/--tile-n/--tile-k "
+                         "(use --tile-m-values/--tile-n-values/--tile-k-values instead)")
+        if args.pe_rows is not None or args.pe_cols is not None:
+            parser.error("--explore cannot be combined with --pe-rows/--pe-cols "
+                         "(use --pe-row-values/--pe-col-values instead)")
+        if args.schedule is not None or args.compare_schedules:
+            parser.error("--explore cannot be combined with --schedule/--compare-schedules "
+                         "(use --schedule-values instead)")
+        if args.sram_kib is None or args.clock_ghz is None:
+            parser.error("--explore requires --sram-kib and --clock-ghz")
+        required_value_flags = (
+            ("--tile-m-values", args.tile_m_values),
+            ("--tile-n-values", args.tile_n_values),
+            ("--tile-k-values", args.tile_k_values),
+            ("--pe-row-values", args.pe_row_values),
+            ("--pe-col-values", args.pe_col_values),
+        )
+        missing = [flag for flag, value in required_value_flags if value is None]
+        if missing:
+            parser.error(f"--explore requires {', '.join(missing)}")
+
     gemm = Gemm(m=args.m, n=args.n, k=args.k, dtype=_DTYPE_CHOICES[args.dtype])
     hardware = HardwareConfig(
         peak_compute_flops_per_second=args.peak_tflops * 1e12,
         memory_bandwidth_bytes_per_second=args.bandwidth_gbps * 1e9,
         name=args.name,
     )
+
+    if args.explore:
+        _run_explore(parser, args, gemm, hardware)
+        return
+
     result = compute_roofline(gemm, hardware)
 
     print(f"Workload: GEMM {gemm.m} x {gemm.n} x {gemm.k} ({args.dtype})")
