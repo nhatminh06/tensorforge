@@ -50,6 +50,15 @@ its full test suite with no MLflow installed at all.
   [calibration.md](calibration.md) and [validation.md](validation.md).
   This still does not add regression gating, GPU telemetry, or hardware
   cost modeling (all later milestones).
+- **Milestone 14** added a **PR performance regression guard**
+  (`tensorforge_ops.regression`): a pure, torch-free comparison of two
+  already-measured `BenchmarkResult`s against an explicit policy, gating
+  on measured p50/p95 latency, throughput, and (CUDA) peak memory --
+  never on Core's predicted/calibrated latency. A GitHub Actions workflow
+  runs base and candidate benchmarks in the same job on GitHub-hosted CPU
+  and posts a report — see [regression-guard.md](regression-guard.md).
+  This does not add GPU telemetry, hardware cost modeling, or automated
+  root-cause diagnosis (all later milestones).
 
 ## Package layout
 
@@ -68,8 +77,11 @@ src/tensorforge_ops/
                             validate_prediction(), ValidationSummary (no torch dependency)
     calibration_pytorch.py  run_pytorch_calibration() -- imports torch, imported
                             lazily by the CLI
+    regression.py           RegressionPolicy, compare_benchmark_results(),
+                            compare_regression_suite(), render_markdown_report()
+                            (no torch dependency, no MLflow dependency)
     cli.py                 python -m tensorforge_ops track / list-runs / benchmark /
-                            calibrate / validate / validate-suite
+                            calibrate / validate / validate-suite / regression
     __main__.py
 ```
 
@@ -140,6 +152,26 @@ summary. See [calibration.md](calibration.md) and
 [validation.md](validation.md) for the full methodology, including why
 this is not a hardware-accurate or pass/fail-graded prediction.
 
+## PR performance regression guard (Milestone 14)
+
+```bash
+python -m tensorforge_ops regression \
+    --baseline base-benchmark.json --candidate candidate-benchmark.json \
+    --policy perf/cpu-ci-policy.json \
+    --output-json regression-result.json --output-markdown regression-report.md
+```
+
+Compares two already-measured `BenchmarkResult`s (never TensorForge's
+predicted/calibrated latency) against an explicit policy and exits `0`
+(pass), `1` (operational/comparison error), or `2` (regression). The
+`.github/workflows/performance-regression.yml` workflow runs this on
+GitHub-hosted CPU for every PR touching `src/**`/`pyproject.toml`/
+`perf/**`, benchmarking base and head commits in the same job so the
+comparison is meaningful. See
+[regression-guard.md](regression-guard.md) for the full policy/threshold
+semantics, same-runner requirements, and CUDA self-hosted-runner
+limitations.
+
 ## Current end-to-end flow
 
 ```
@@ -152,7 +184,9 @@ real benchmark (Milestone 12)
 device calibration (Milestone 13)
       |
 prediction-vs-measurement validation (Milestone 13)
+      |
+PR performance regression guard (Milestone 14)
 ```
 
-Regression gating on top of this validation is a future milestone, not
-yet implemented.
+GPU telemetry correlation and hardware right-sizing/cost planning are
+future milestones, not yet implemented.

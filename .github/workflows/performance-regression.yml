@@ -1,0 +1,171 @@
+name: performance-regression
+
+# Runs base and candidate benchmarks in the SAME job/runner instance and
+# compares them with tensorforge_ops.regression. Never uses
+# pull_request_target (which would run PR code with elevated
+# permissions/secrets) -- only the standard, read-scoped `pull_request`
+# trigger executes PR code here. No project secrets are used; the only
+# token is the built-in GITHUB_TOKEN, scoped to pull-requests: write
+# purely for the optional same-repo PR comment.
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "pyproject.toml"
+      - "perf/**"
+      - ".github/workflows/performance-regression.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  performance-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install isolated base/candidate environments
+        run: |
+          python -m venv base/.venv
+          python -m venv candidate/.venv
+          base/.venv/bin/pip install -q -e "./base[ops,benchmark]"
+          candidate/.venv/bin/pip install -q -e "./candidate[ops,benchmark]"
+
+      - name: Write benchmark runner
+        run: |
+          mkdir -p "${RUNNER_TEMP}/tensorforge-perf/base" "${RUNNER_TEMP}/tensorforge-perf/candidate"
+          cat > "${RUNNER_TEMP}/run_benchmark.py" <<'PYEOF'
+          # Uses only tensorforge/tensorforge_ops package APIs (stable since
+          # Milestone 11/12) rather than the `benchmark` CLI's --output-json
+          # flag, so this works identically against a base commit that
+          # predates this milestone's CLI flag.
+          import sys
+
+          from tensorforge.experiments import ExperimentSpec, run_experiment
+          from tensorforge.presets import get_workload_preset
+          from tensorforge_ops.benchmark import BenchmarkConfig
+          from tensorforge_ops.benchmark_pytorch import run_pytorch_benchmark
+          from tensorforge_ops.tracking import compute_result_fingerprint
+
+          workload_preset, output_path = sys.argv[1], sys.argv[2]
+
+          spec = ExperimentSpec(
+              name=f"{workload_preset}-ci-regression-guard",
+              workload_preset=workload_preset,
+              accelerator_preset="balanced",
+              tile_m_values=(32, 64, 128),
+              tile_n_values=(32, 64, 128),
+              tile_k_values=(32, 64, 128),
+          )
+          result = run_experiment(spec)
+          fingerprint = compute_result_fingerprint(result)
+
+          preset = get_workload_preset(workload_preset)
+          config = BenchmarkConfig(backend="pytorch", device="cpu", warmup_iterations=5, measured_iterations=30)
+          benchmark_result = run_pytorch_benchmark(preset, fingerprint, config)
+
+          with open(output_path, "w", encoding="utf-8") as f:
+              f.write(benchmark_result.to_json())
+          PYEOF
+
+      - name: Run base benchmarks
+        run: |
+          for workload in gemm_tiny conv_pointwise; do
+            base/.venv/bin/python "${RUNNER_TEMP}/run_benchmark.py" "$workload" \
+              "${RUNNER_TEMP}/tensorforge-perf/base/${workload}.json"
+          done
+
+      - name: Run candidate benchmarks
+        run: |
+          for workload in gemm_tiny conv_pointwise; do
+            candidate/.venv/bin/python "${RUNNER_TEMP}/run_benchmark.py" "$workload" \
+              "${RUNNER_TEMP}/tensorforge-perf/candidate/${workload}.json"
+          done
+
+      - name: Compare base vs. candidate
+        id: compare
+        run: |
+          RESULT_DIR="${RUNNER_TEMP}/tensorforge-perf"
+          overall_exit=0
+          echo "# TensorForge Performance Regression Guard" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Environment: GitHub-hosted Linux CPU (${RUNNER_NAME:-unknown runner})" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Base: \`${{ github.event.pull_request.base.sha }}\`  " >> "$GITHUB_STEP_SUMMARY"
+          echo "Candidate: \`${{ github.event.pull_request.head.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          for workload in gemm_tiny conv_pointwise; do
+            set +e
+            candidate/.venv/bin/python -m tensorforge_ops regression \
+              --baseline "$RESULT_DIR/base/${workload}.json" \
+              --candidate "$RESULT_DIR/candidate/${workload}.json" \
+              --policy candidate/perf/cpu-ci-policy.json \
+              --output-json "$RESULT_DIR/${workload}-regression-result.json" \
+              --output-markdown "$RESULT_DIR/${workload}-regression-report.md"
+            workload_exit=$?
+            set -e
+            cat "$RESULT_DIR/${workload}-regression-report.md" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$workload_exit" -ne 0 ]; then
+              overall_exit=$workload_exit
+            fi
+          done
+
+          echo "exit_code=$overall_exit" >> "$GITHUB_OUTPUT"
+
+      - name: Upload performance artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tensorforge-performance-results
+          path: |
+            ${{ runner.temp }}/tensorforge-perf/base/*.json
+            ${{ runner.temp }}/tensorforge-perf/candidate/*.json
+            ${{ runner.temp }}/tensorforge-perf/*-regression-result.json
+            ${{ runner.temp }}/tensorforge-perf/*-regression-report.md
+          retention-days: 14
+
+      - name: Comment on PR (same-repository PRs only)
+        if: always() && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          MARKER="<!-- tensorforge-performance-guard -->"
+          BODY_FILE="${RUNNER_TEMP}/pr-comment-body.md"
+          {
+            echo "$MARKER"
+            cat "${RUNNER_TEMP}/tensorforge-perf/gemm_tiny-regression-report.md"
+            echo ""
+            cat "${RUNNER_TEMP}/tensorforge-perf/conv_pointwise-regression-report.md"
+          } > "$BODY_FILE"
+
+          existing_id=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" | head -n1)
+
+          if [ -n "$existing_id" ]; then
+            jq -n --rawfile body "$BODY_FILE" '{body: $body}' \
+              | gh api --method PATCH "repos/${{ github.repository }}/issues/comments/$existing_id" --input -
+          else
+            jq -n --rawfile body "$BODY_FILE" '{body: $body}' \
+              | gh api --method POST "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" --input -
+          fi
+
+      - name: Gate on regression result
+        run: exit ${{ steps.compare.outputs.exit_code }}

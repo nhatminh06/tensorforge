@@ -1,0 +1,19 @@
+{
+  "regression_policy_schema_version": 1,
+  "metrics": {
+    "p50_latency_seconds": {
+      "max_relative_regression": 0.20,
+      "max_absolute_regression_seconds": 0.00005
+    },
+    "p95_latency_seconds": {
+      "max_relative_regression": 0.50
+    },
+    "throughput_per_second": {
+      "max_relative_regression": 0.25
+    },
+    "peak_memory_allocated_bytes": {
+      "max_relative_regression": 0.10,
+      "max_absolute_regression_bytes": 16777216
+    }
+  }
+}

@@ -194,3 +194,53 @@ class BenchmarkResult:
         import json
 
         return json.dumps(self.to_dict(), sort_keys=True, indent=indent)
+
+
+def benchmark_result_from_dict(d: dict) -> BenchmarkResult:
+    """Reconstruct a BenchmarkResult from BenchmarkResult.to_dict()'s output.
+
+    Requires an exact benchmark_schema_version match -- a version mismatch
+    means measurement semantics may have changed, so results are not
+    directly comparable and this refuses to silently convert.
+    """
+    schema_version = d.get("benchmark_schema_version")
+    if schema_version != BENCHMARK_SCHEMA_VERSION:
+        raise ValueError(
+            f"benchmark schema version mismatch: expected {BENCHMARK_SCHEMA_VERSION}, "
+            f"got {schema_version!r} -- benchmark results are not directly comparable "
+            "across schema versions"
+        )
+
+    stats_dict = d["measured_latency_statistics_seconds"]
+    statistics = LatencyStatistics(
+        count=stats_dict["count"],
+        mean_seconds=stats_dict["mean"],
+        p50_seconds=stats_dict["p50"],
+        p95_seconds=stats_dict["p95"],
+        p99_seconds=stats_dict["p99"],
+        min_seconds=stats_dict["min"],
+        max_seconds=stats_dict["max"],
+        throughput_per_second=d["measured_throughput_per_second"],
+    )
+    workload = d["workload"]
+    return BenchmarkResult(
+        core_result_fingerprint=d["core_result_fingerprint"],
+        workload_preset=workload["preset"],
+        workload_kind=workload["kind"],
+        backend=d["backend"],
+        device=d["device"],
+        dtype=d["dtype"],
+        warmup_iterations=d["warmup_iterations"],
+        measured_iterations=d["measured_iterations"],
+        latency_samples_seconds=tuple(d["latency_samples_seconds"]),
+        statistics=statistics,
+        peak_memory_allocated_bytes=d["measured_peak_memory_allocated_bytes"],
+        runtime_metadata=dict(d["runtime_metadata"]),
+    )
+
+
+def load_benchmark_result(path: str) -> BenchmarkResult:
+    import json
+
+    with open(path, encoding="utf-8") as f:
+        return benchmark_result_from_dict(json.load(f))

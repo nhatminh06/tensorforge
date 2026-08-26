@@ -1132,3 +1132,25 @@ TensorForge Core (`src/tensorforge/`) is frozen as a modeling boundary.
 - Calibration artifacts (`calibration-profile.json`), benchmark
   artifacts, Core artifacts, and validation artifacts stay separate
   files/schemas -- never merged into one combined schema.
+- PR performance regression gates use measured base-vs-candidate
+  BenchmarkResult metrics, never Core's predicted/calibrated latency;
+  analytical/calibration data may appear only as explanatory context.
+- Baseline and candidate benchmarks must run on the same physical
+  runner/job where possible; do not compare results from separate,
+  unrelated runner instances as if they were controlled.
+- No hidden regression thresholds -- every gate value comes from an
+  explicit, committed policy file.
+- A workload/backend/device/dtype/schema mismatch between baseline and
+  candidate benchmarks invalidates the comparison (ERROR), never a
+  computed pass/fail.
+- A metric that is `None` on both sides is NOT_COMPARABLE, never
+  converted to zero; a metric missing on only one side is a comparison
+  ERROR (measurement coverage changed).
+- Regression FAIL (valid comparison, policy violated) is a distinct
+  status from ERROR (comparison could not be validly performed) -- never
+  conflate the two, including in CLI exit codes.
+- Never use `pull_request_target` to execute untrusted PR code.
+- Never weaken a regression policy solely to make a specific PR pass;
+  changing a threshold requires the same evidence-based justification as
+  setting it the first time.
+- No AI attribution.
