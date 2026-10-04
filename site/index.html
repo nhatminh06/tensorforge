@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="TensorForge analytical ML-systems performance modeling, validated against a real GPU capture.">
+  <title>TensorForge — Hardware performance evidence</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to evidence</a>
+  <header class="site-header">
+    <a class="wordmark" href="#top" aria-label="TensorForge home">TENSORFORGE <span>/ LAB NOTE 01</span></a>
+    <nav aria-label="Primary navigation">
+      <a href="#comparison">Results</a><a href="#telemetry">Telemetry</a><a href="#method">Method</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero ruled" id="top" aria-labelledby="hero-title">
+      <div class="eyebrow">CANONICAL HARDWARE CAPTURE</div>
+      <div class="hero-grid">
+        <div>
+          <h1 id="hero-title">Analytical ML performance modeling,<br><em>tested against hardware.</em></h1>
+          <p class="lede">TensorForge predicts accelerator performance, measures the same workload with PyTorch CUDA, and keeps the disagreement visible.</p>
+          <div class="actions">
+            <a class="button dark" href="https://github.com/nhatminh06/tensorforge">Repository</a>
+            <a class="button" href="data/manifest.json">Evidence JSON</a>
+            <a class="button" href="#method">Methodology</a>
+          </div>
+        </div>
+        <aside class="specimen" aria-label="Capture environment">
+          <span class="spec-label">CAPTURE SUBJECT</span>
+          <strong id="device-name">Loading evidence…</strong>
+          <dl><div><dt>Runtime</dt><dd id="runtime">—</dd></div><div><dt>Precision</dt><dd id="dtype">—</dd></div><div><dt>Source</dt><dd id="capture-source">—</dd></div></dl>
+        </aside>
+      </div>
+      <div class="hero-metrics" aria-label="Primary capture result">
+        <div class="metric analytical"><span>ANALYTICAL · PREDICTED</span><strong id="hero-predicted">—</strong></div>
+        <div class="metric measured"><span>MEASURED · P50</span><strong id="hero-measured">—</strong></div>
+        <div class="metric calibrated"><span>ABSOLUTE PERCENTAGE ERROR</span><strong id="hero-ape">—</strong></div>
+      </div>
+      <p class="load-error" id="load-error" role="alert" hidden></p>
+    </section>
+
+    <section class="taxonomy ruled" aria-labelledby="taxonomy-title">
+      <header class="section-head"><span>01 / EVIDENCE LANGUAGE</span><h2 id="taxonomy-title">Five labels. Five different claims.</h2></header>
+      <div class="taxonomy-grid">
+        <article class="tax analytical"><h3>PREDICTED</h3><p>Analytical Core output derived from workload, mapping, traffic, and timing assumptions.</p></article>
+        <article class="tax measured"><h3>MEASURED</h3><p>Physical PyTorch latency, throughput, and CUDA memory from this device.</p></article>
+        <article class="tax calibrated"><h3>CALIBRATED</h3><p>Empirical compute and memory-copy ceilings measured by dedicated probes.</p></article>
+        <article class="tax diagnostic"><h3>DIAGNOSTIC</h3><p>NVML context from a separate telemetry execution window.</p></article>
+        <article class="tax policy"><h3>POLICY</h3><p>Decisions that exist only when their required evidence exists.</p></article>
+      </div>
+    </section>
+
+    <section class="comparison ruled" id="comparison" aria-labelledby="comparison-title">
+      <header class="section-head"><span>02 / MODEL AGREEMENT</span><h2 id="comparison-title">The model is useful because its boundary is measurable.</h2></header>
+      <div class="comparison-grid">
+        <article class="workload primary">
+          <div class="workload-head"><div><span>PRIMARY</span><h3>gemm_large_square</h3></div><strong id="primary-ratio">—</strong></div>
+          <div class="bar-chart" id="primary-chart" role="img" aria-labelledby="primary-chart-label"></div>
+          <p class="chart-equivalent" id="primary-chart-label">Loading primary comparison.</p>
+          <dl class="data-table" id="primary-values"></dl>
+          <p>On this capture, TensorForge’s calibrated analytical lower bound tracked the large square GEMM closely. This is one workload on one GPU—not a claim about all GEMMs or devices.</p>
+        </article>
+        <article class="workload contrast">
+          <div class="workload-head"><div><span>CONTRAST</span><h3>gemm_tiny</h3></div><strong id="contrast-ratio">—</strong></div>
+          <div class="bar-chart" id="contrast-chart" role="img" aria-labelledby="contrast-chart-label"></div>
+          <p class="chart-equivalent" id="contrast-chart-label">Loading contrast comparison.</p>
+          <dl class="data-table" id="contrast-values"></dl>
+          <p>The tiny workload diverges sharply. This is consistent with fixed framework or kernel-launch overhead absent from the lower-bound model, but this experiment does not establish that explanation as causal.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="calibration ruled" aria-labelledby="calibration-title">
+      <header class="section-head"><span>03 / EMPIRICAL CALIBRATION</span><h2 id="calibration-title">Measured ceilings, not marketing peaks.</h2></header>
+      <div class="calibration-grid">
+        <article><span>COMPUTE PROBE · MEASURED EMPIRICAL CEILING</span><strong id="compute-rate">—</strong><p id="compute-probe">—</p></article>
+        <article><span>MEMORY COPY PROBE · MEASURED EMPIRICAL CEILING</span><strong id="memory-rate">—</strong><p id="memory-probe">—</p></article>
+      </div>
+    </section>
+
+    <section class="anatomy ruled" aria-labelledby="anatomy-title">
+      <header class="section-head"><span>04 / PREDICTION ANATOMY</span><h2 id="anatomy-title">From workload description to lower bound.</h2></header>
+      <div class="flow" role="img" aria-label="Workload flows through FLOPs and traffic, mapping and tiling, empirical calibration, and maximum compute or memory time to predicted latency.">
+        <div>WORKLOAD</div><i>↓</i><div>FLOPs + TRAFFIC</div><i>↓</i><div>MAPPING + TILING</div><i>↓</i><div>CALIBRATION CEILINGS</div><i>↓</i><div>MAX(COMPUTE, MEMORY)</div><i>↓</i><div>PREDICTED LATENCY</div>
+      </div>
+      <p class="classification"><span>ANALYTICAL CLASSIFICATION</span> Predicted bottleneck: <strong id="bottleneck">—</strong>. NVML does not prove this classification.</p>
+    </section>
+
+    <section class="telemetry ruled" id="telemetry" aria-labelledby="telemetry-title">
+      <header class="section-head"><span>05 / DIAGNOSTIC WINDOW</span><h2 id="telemetry-title">What the GPU reported in a separate run.</h2></header>
+      <p class="section-intro">Telemetry was collected in a separate execution phase from latency measurement. It supplies diagnostic context and never determines a regression or performance verdict.</p>
+      <div class="telemetry-controls"><label for="telemetry-metric">Trace metric</label><select id="telemetry-metric"><option value="gpu_utilization_percent">GPU utilization</option><option value="power_watts">Power</option><option value="temperature_celsius">Temperature</option><option value="sm_clock_mhz">SM clock</option><option value="memory_activity_percent">Memory activity</option></select></div>
+      <figure class="trace-figure"><svg id="telemetry-chart" viewBox="0 0 960 300" role="img" aria-labelledby="trace-title trace-desc"><title id="trace-title">NVML telemetry trace</title><desc id="trace-desc">Loading telemetry samples.</desc></svg><figcaption id="trace-equivalent">Loading trace values.</figcaption></figure>
+      <div class="telemetry-notes">
+        <article><span>OBSERVED EVENT</span><strong>SwPowerCap</strong><p>NVML reported <code>SwPowerCap</code> during parts of the telemetry window. This is observed context, not proof that the benchmark was power-limited.</p></article>
+        <article><span>UNAVAILABLE ON THIS DEVICE</span><ul id="unavailable-list"><li>Loading capability evidence…</li></ul></article>
+      </div>
+    </section>
+
+    <section class="policy-section ruled" aria-labelledby="policy-title">
+      <header class="section-head"><span>06 / EVIDENCE BOUNDARIES</span><h2 id="policy-title">No evidence, no verdict.</h2></header>
+      <div class="policy-grid">
+        <article><span>REGRESSION</span><strong id="regression-status">—</strong><p id="regression-reason">—</p></article>
+        <article><span>RIGHT-SIZING</span><strong id="sizing-status">—</strong><p id="sizing-reason">—</p></article>
+        <article><span>IMPACT</span><strong id="impact-status">—</strong><p id="impact-reason">—</p></article>
+      </div>
+    </section>
+
+    <section class="architecture ruled" aria-labelledby="architecture-title">
+      <header class="section-head"><span>07 / SYSTEM ARCHITECTURE</span><h2 id="architecture-title">Ops wraps Core. Core remains independent.</h2></header>
+      <div class="architecture-scroll" tabindex="0" aria-label="TensorForge architecture diagram; scroll horizontally on small screens">
+        <div class="architecture-diagram">
+          <div class="arch-column core"><h3>TENSORFORGE CORE</h3><div>Workloads<br><small>GEMM / Conv2D / Transformer</small></div><i>↓</i><div>Mapping / PE array / SRAM</div><i>↓</i><div>Tiling + residency schedules</div><i>↓</i><div>Timing + bounded exploration</div><i>↓</i><div>Deterministic analytical result</div></div>
+          <div class="dependency"><strong>tensorforge_ops</strong><b>→</b><strong>tensorforge</strong><span>DEPENDENCY DIRECTION</span></div>
+          <div class="arch-column ops"><h3>TENSORFORGE OPS</h3><div>PyTorch benchmark</div><div>Calibration + validation</div><div>Regression gate</div><div>NVML telemetry</div><div>Right-sizing</div><div>Impact report</div></div>
+        </div>
+      </div>
+      <p>Core imports none of PyTorch, MLflow, NVML, or TensorForge Ops. The dependency arrow never reverses.</p>
+    </section>
+
+    <section class="method ruled" id="method" aria-labelledby="method-title">
+      <header class="section-head"><span>08 / METHOD + PROVENANCE</span><h2 id="method-title">A captured experiment with a verifiable source.</h2></header>
+      <div class="method-grid">
+        <dl id="method-values"></dl>
+        <dl id="provenance-values"></dl>
+      </div>
+      <div class="actions"><a class="button dark" href="https://github.com/nhatminh06/tensorforge/tree/main/docs/evidence/canonical">Canonical evidence</a><a class="button" href="https://github.com/nhatminh06/tensorforge/blob/main/docs/evidence/canonical/README.md">Evidence methodology</a></div>
+    </section>
+
+    <section class="limitations ruled" aria-labelledby="limitations-title">
+      <header class="section-head"><span>09 / LIMITS OF CLAIM</span><h2 id="limitations-title">What this capture does not establish.</h2></header>
+      <ul><li>One physical GPU and one capture session</li><li>Laptop thermal and power state affect measurements</li><li>Analytical lower bound—not cycle accurate</li><li>Not a GPU simulator</li><li>No measured-bottleneck claim</li><li>No generalization to every RTX 3050 laptop</li><li>No production capacity claim</li><li>No model-quality assessment</li></ul>
+    </section>
+  </main>
+  <footer><span>TENSORFORGE / CANONICAL CAPTURE</span><span>Analytical reasoning meets measured evidence.</span></footer>
+  <script src="evidence.js" defer></script>
+</body>
+</html>

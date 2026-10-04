@@ -1,5 +1,8 @@
 # TensorForge
 
+[Project showcase](https://nhatminh06.github.io/tensorforge/) ·
+[Canonical RTX 3050 evidence](docs/evidence/canonical/README.md)
+
 An analytical AI-accelerator performance modeling toolkit for studying how
 GEMM, Transformer, and Conv2D workloads interact with PE geometry, SRAM
 capacity, tiling, data residency, and DRAM bandwidth.
