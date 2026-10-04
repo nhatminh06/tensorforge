@@ -188,6 +188,12 @@ python -m tensorforge --workload-preset gemm_tiny --accelerator-preset balanced 
 bash scripts/demo.sh
 ```
 
+For the end-to-end CUDA portfolio experiment, see
+[`tools/demo/README.md`](tools/demo/README.md). Its capture command composes the
+existing Core and Ops implementations into a sanitized evidence bundle and
+deliberately fails when CUDA/NVML or a genuine prior-revision baseline is not
+available.
+
 ## TensorForge Ops (Phase 2)
 
 TensorForge Core (`src/tensorforge/`) is frozen as a standalone
