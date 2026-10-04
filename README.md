@@ -6,7 +6,8 @@ PyTorch/CUDA execution and GPU telemetry.
 
 [Project showcase](https://nhatminh06.github.io/tensorforge/) ·
 [Canonical RTX 3050 evidence](docs/evidence/canonical/README.md) ·
-[Architecture](docs/architecture.md)
+[Architecture](docs/architecture.md) ·
+[Demo video](https://github.com/nhatminh06/tensorforge/releases/download/portfolio-v1/tensorforge-demo.mp4)
 
 It makes workload arithmetic, PE-array mapping, SRAM feasibility, DRAM
 traffic, and timing assumptions inspectable. It is not a cycle-accurate GPU

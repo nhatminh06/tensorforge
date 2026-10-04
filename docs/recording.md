@@ -1,8 +1,8 @@
 # TensorForge portfolio recording
 
-The final recording is a factual walkthrough of the committed canonical
-evidence, not a live benchmark. Target **3:30** and keep the finished video
-between three and four minutes.
+The [published demo video](https://github.com/nhatminh06/tensorforge/releases/download/portfolio-v1/tensorforge-demo.mp4)
+is a factual 3:30 walkthrough of the committed canonical evidence, not a live
+benchmark. This guide is the deterministic script for a narrated recording.
 
 ## Preparation
 
