@@ -10,11 +10,20 @@ That requirement prevents the demo from presenting two unchanged-code repeats
 as a model/configuration change.
 
 ```bash
-pip install -e '.[benchmark,telemetry]'
+python -m pip install -e '.[ops,benchmark,telemetry]'
 ./tools/demo/capture.sh docs/evidence/canonical \
   --baseline-benchmark /path/to/baseline-benchmark.json \
   --baseline-telemetry /path/to/baseline-telemetry-summary.json
 ```
+
+The canonical capture does not run an MLflow service. The `ops` extra is
+currently required because the CLI/package dependency graph imports the
+tracking module even though this file-based workflow does not contact MLflow.
+
+When no defensible performance-changing historical baseline exists, omit both
+baseline options. The bundle will record regression and impact as
+`not_evaluated`. Supplying exactly one baseline option is an error; supplying
+both preserves the full measured-regression workflow.
 
 The capture requires CUDA and NVML and fails rather than falling back to CPU.
 Latency measurement and telemetry collection remain separate phases. MLflow is

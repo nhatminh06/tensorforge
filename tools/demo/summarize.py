@@ -35,9 +35,21 @@ def main():
     print(f"prediction       {duration(contrast['prediction']['latency_seconds'])}")
     print(f"measured p50     {duration(contrast['measurement']['p50_latency_seconds'])}")
     print(f"APE              {contrast['error']['absolute_percentage_error']:.1f}%\n")
-    print(f"REGRESSION\n{m['regression']['status']}\n")
+    regression = m["regression"]
+    print(f"REGRESSION\n{regression['status'].replace('_', ' ').upper()}")
+    if regression.get("reason"):
+        print(regression["reason"])
+    print()
     print(f"TELEMETRY\n{m['telemetry']['status']} ({m['telemetry']['sample_count']} samples)\n")
-    print(f"IMPACT\n{m['impact']['status']}")
+    sizing = m["right_sizing"]
+    print(f"RIGHT-SIZING\n{sizing['status'].replace('_', ' ').upper()}")
+    if sizing.get("reason"):
+        print(sizing["reason"])
+    print()
+    impact = m["impact"]
+    print(f"IMPACT\n{impact['status'].replace('_', ' ').upper()}")
+    if impact.get("reason"):
+        print(impact["reason"])
 
 
 if __name__ == "__main__":
