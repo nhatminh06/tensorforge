@@ -147,7 +147,9 @@ def main():
     sha = manifest.get("tensorforge_commit")
     if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
         fail("manifest tensorforge_commit must be a full Git SHA")
-    forbidden_keys = re.compile(r'(?i)"(?:hostname|username|password|secret|access_token|auth_token)"\s*:')
+    forbidden_keys = re.compile(
+        r'(?i)"(?:hostname|username|password|secret|access_token|auth_token|device_uuid)"\s*:'
+    )
     for path in bundle.iterdir():
         if path.is_file() and path.name != "SHA256SUMS":
             text = path.read_text(encoding="utf-8")

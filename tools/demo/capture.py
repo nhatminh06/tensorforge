@@ -275,6 +275,7 @@ def main() -> int:
         )
         telemetry = summarize_telemetry_trace(trace)
         capabilities = probe_capabilities(telemetry_config.device_index)
+        capabilities["runtime_metadata"].pop("device_uuid", None)
         (out / "telemetry-trace.json").write_text(trace.to_json() + "\n", encoding="utf-8")
         (out / "telemetry-summary.json").write_text(telemetry.to_json() + "\n", encoding="utf-8")
         write_json(out / "telemetry-capabilities.json", capabilities)

@@ -118,3 +118,12 @@ def test_validator_rejects_inconsistent_measurement_only_artifacts(tmp_path):
     result = run_tool("validate", bundle)
     assert result.returncode != 0
     assert "contains regression/impact artifacts" in result.stderr
+
+
+def test_validator_rejects_device_uuid(tmp_path):
+    bundle = tmp_path / "evidence"
+    make_measurement_bundle(bundle)
+    write_json(bundle / "telemetry-capabilities.json", {"device_uuid": "GPU-private-identifier"})
+    result = run_tool("validate", bundle)
+    assert result.returncode != 0
+    assert "unsafe environment metadata" in result.stderr
