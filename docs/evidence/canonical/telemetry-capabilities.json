@@ -1,0 +1,25 @@
+{
+  "capabilities": {
+    "clock_event_reasons": true,
+    "dram_bandwidth_utilization_percent": false,
+    "gpu_utilization_percent": true,
+    "memory_activity_percent": true,
+    "memory_clock_mhz": true,
+    "memory_used_bytes": true,
+    "performance_state": true,
+    "power_watts": true,
+    "sm_activity_percent": false,
+    "sm_clock_mhz": true,
+    "sm_occupancy_percent": false,
+    "temperature_celsius": true,
+    "tensor_activity_percent": false
+  },
+  "device_index": 0,
+  "device_name": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "runtime_metadata": {
+    "compute_capability": "8.6",
+    "gpm_supported": false,
+    "nvidia_ml_py_version": "13.615.71",
+    "nvml_driver_version": "615.71.09"
+  }
+}

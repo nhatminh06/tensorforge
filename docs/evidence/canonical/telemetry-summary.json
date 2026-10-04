@@ -1,0 +1,91 @@
+{
+  "available_metrics": [
+    "gpu_utilization_percent",
+    "memory_activity_percent",
+    "memory_used_bytes",
+    "power_watts",
+    "temperature_celsius",
+    "sm_clock_mhz",
+    "memory_clock_mhz"
+  ],
+  "dram_bandwidth_utilization_percent": {
+    "max": null,
+    "mean": null,
+    "min": null,
+    "sample_count": 0
+  },
+  "duration_seconds": 5.18976729199494,
+  "gpu_utilization_percent": {
+    "max": 100.0,
+    "mean": 94.4,
+    "min": 2.0,
+    "sample_count": 35
+  },
+  "memory_activity_percent": {
+    "max": 40.0,
+    "mean": 36.48571428571429,
+    "min": 0.0,
+    "sample_count": 35
+  },
+  "memory_clock_mhz": {
+    "max": 6001,
+    "mean": 6001.0,
+    "min": 6001,
+    "sample_count": 35
+  },
+  "memory_total_bytes": 4294967296,
+  "memory_used_bytes": {
+    "max": 582746112,
+    "mean": 582746112.0,
+    "min": 582746112,
+    "sample_count": 35
+  },
+  "power_watts": {
+    "max": 67.778,
+    "mean": 58.44282857142857,
+    "min": 23.778,
+    "sample_count": 35
+  },
+  "sample_count": 35,
+  "sm_activity_percent": {
+    "max": null,
+    "mean": null,
+    "min": null,
+    "sample_count": 0
+  },
+  "sm_clock_mhz": {
+    "max": 1762,
+    "mean": 1695.8285714285714,
+    "min": 1500,
+    "sample_count": 35
+  },
+  "sm_occupancy_percent": {
+    "max": null,
+    "mean": null,
+    "min": null,
+    "sample_count": 0
+  },
+  "telemetry_schema_version": 1,
+  "temperature_celsius": {
+    "max": 63.0,
+    "mean": 60.51428571428571,
+    "min": 54.0,
+    "sample_count": 35
+  },
+  "tensor_activity_percent": {
+    "max": null,
+    "mean": null,
+    "min": null,
+    "sample_count": 0
+  },
+  "throttle_reasons_observed": [
+    "GpuIdle",
+    "SwPowerCap"
+  ],
+  "unavailable_metrics": [
+    "sm_activity_percent",
+    "sm_occupancy_percent",
+    "tensor_activity_percent",
+    "dram_bandwidth_utilization_percent"
+  ]
+}

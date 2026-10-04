@@ -1,0 +1,30 @@
+{
+  "backend": "pytorch",
+  "calibration_fingerprint": "sha256:92c28c2c2bb95ba011b1bb1e6ff86f6dcf2694844de810f9e949d7afb3919991",
+  "core_result_fingerprint": "sha256:6e6f79873fadb6b831c85e0a993d699b45911c652645dbd7715fcb5eb061020a",
+  "device": "cuda:0",
+  "dtype": "fp16",
+  "error": {
+    "absolute_error_seconds": 1.173512980745528e-05,
+    "absolute_percentage_error": 95.570723832699,
+    "measured_to_predicted_ratio": 22.57705237217923,
+    "relative_error": -0.95570723832699,
+    "signed_error_seconds": -1.173512980745528e-05
+  },
+  "measurement": {
+    "mean_latency_seconds": 1.2910099758300931e-05,
+    "p50_latency_seconds": 1.2279000657144934e-05,
+    "p95_latency_seconds": 1.379075183649547e-05
+  },
+  "prediction": {
+    "bottleneck": "memory-bound",
+    "compute_seconds": 3.5885986360284505e-07,
+    "latency_seconds": 5.438708496896538e-07,
+    "memory_seconds": 5.438708496896538e-07
+  },
+  "validation_schema_version": 1,
+  "workload": {
+    "kind": "gemm",
+    "preset": "gemm_tiny"
+  }
+}

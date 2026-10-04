@@ -1,0 +1,70 @@
+{
+  "calibration": {
+    "compute_probe_shape": [
+      2048,
+      2048,
+      2048
+    ],
+    "effective_compute_tflops": 11.687860430783342,
+    "effective_memory_gbps": 180.7487936816152,
+    "memory_probe_mib": 64
+  },
+  "contrast_workload": "gemm_tiny",
+  "device": {
+    "backend": "pytorch",
+    "device": "cuda:0",
+    "dtype": "fp16",
+    "name": "NVIDIA GeForce RTX 3050 Laptop GPU"
+  },
+  "impact": {
+    "reason": "A measured regression result is required.",
+    "status": "not_evaluated"
+  },
+  "measurement": {
+    "measured_iterations": 50,
+    "warmup_iterations": 10
+  },
+  "primary_workload": "gemm_large_square",
+  "regression": {
+    "reason": "No defensible performance-changing historical baseline was available.",
+    "status": "not_evaluated"
+  },
+  "right_sizing": {
+    "reason": "Only one physical device was measured.",
+    "status": "omitted"
+  },
+  "runtime": {
+    "cuda_runtime_version": "13.0",
+    "pytorch_version": "2.14.1+cu130"
+  },
+  "schema_version": 2,
+  "telemetry": {
+    "sample_count": 35,
+    "status": "captured",
+    "supported_fields": [
+      "clock_event_reasons",
+      "gpu_utilization_percent",
+      "memory_activity_percent",
+      "memory_clock_mhz",
+      "memory_used_bytes",
+      "performance_state",
+      "power_watts",
+      "sm_clock_mhz",
+      "temperature_celsius"
+    ],
+    "unavailable_fields": [
+      "dram_bandwidth_utilization_percent",
+      "sm_activity_percent",
+      "sm_occupancy_percent",
+      "tensor_activity_percent"
+    ]
+  },
+  "tensorforge_commit": "37871229d6bc44991a4900ad00449fe390065b88",
+  "validation": {
+    "ape_percent": 5.8557024132649325,
+    "measured_p50_seconds": 0.00019516450265655294,
+    "measured_p95_seconds": 0.00022512414871016516,
+    "predicted_bottleneck": "compute-bound",
+    "predicted_seconds": 0.00018373625016465667
+  }
+}

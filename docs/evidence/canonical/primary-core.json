@@ -1,0 +1,70 @@
+{
+  "accelerator": {
+    "bandwidth_bytes_per_second": 100000000000.0,
+    "clock_hz": 1000000000.0,
+    "pe_cols": 32,
+    "pe_rows": 32,
+    "peak_compute_flops_per_second": 2048000000000.0,
+    "preset": "balanced",
+    "sram_bytes": 524288
+  },
+  "limitations": [
+    "analytical model, not cycle-accurate",
+    "bandwidth-only DRAM timing (no DRAM/SRAM latency, no bank/controller/NoC model)",
+    "bounded discrete tile/schedule search over user-supplied candidates only, not a proof of optimality",
+    "Transformer/CNN results are GEMM-only: softmax, normalization, activation, pooling, and residual operations are excluded, not free",
+    "convolution uses a materialized-im2col GEMM lowering, not direct-convolution traffic",
+    "no cross-operation/cross-layer SRAM residency (each GEMM evaluated independently at the DRAM boundary)",
+    "no real-hardware validation; accelerator presets are generic experiment configurations, not real hardware specifications"
+  ],
+  "name": "gemm_large_square-canonical-evidence",
+  "primary_metrics": {
+    "bottleneck": "compute-bound",
+    "effective_arithmetic_intensity": 60.23529411764706,
+    "perfect_overlap_time_seconds": 0.001048576,
+    "serialized_time_seconds": 0.0014050918400000001,
+    "total_dram_bytes": 35651584,
+    "total_flops": 2147483648,
+    "total_macs": 1073741824
+  },
+  "schema_version": 1,
+  "search": {
+    "schedules": [
+      "c-resident",
+      "a-resident",
+      "b-resident"
+    ],
+    "tile_k_values": [
+      32,
+      64,
+      128
+    ],
+    "tile_m_values": [
+      32,
+      64,
+      128
+    ],
+    "tile_n_values": [
+      32,
+      64,
+      128
+    ]
+  },
+  "selected_mappings": [
+    {
+      "operation": "gemm",
+      "schedule": "c-resident",
+      "tile_k": 32,
+      "tile_m": 128,
+      "tile_n": 128
+    }
+  ],
+  "workload": {
+    "dtype": "FP16",
+    "k": 1024,
+    "kind": "gemm",
+    "m": 1024,
+    "n": 1024,
+    "preset": "gemm_large_square"
+  }
+}
