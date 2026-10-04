@@ -1,182 +1,142 @@
 # TensorForge
 
+TensorForge is an analytical ML-systems performance toolkit that models
+accelerator workloads, then validates its predictions against measured
+PyTorch/CUDA execution and GPU telemetry.
+
 [Project showcase](https://nhatminh06.github.io/tensorforge/) ·
-[Canonical RTX 3050 evidence](docs/evidence/canonical/README.md)
+[Canonical RTX 3050 evidence](docs/evidence/canonical/README.md) ·
+[Architecture](docs/architecture.md)
 
-An analytical AI-accelerator performance modeling toolkit for studying how
-GEMM, Transformer, and Conv2D workloads interact with PE geometry, SRAM
-capacity, tiling, data residency, and DRAM bandwidth.
+It makes workload arithmetic, PE-array mapping, SRAM feasibility, DRAM
+traffic, and timing assumptions inspectable. It is not a cycle-accurate GPU
+simulator or an MLOps platform.
 
-## Why TensorForge
-
-Understanding accelerator performance requires reasoning across several
-layers at once: how much arithmetic a workload needs, how it maps onto a
-finite PE array, whether its working set fits in SRAM, how tiling and
-loop order change data movement, and whether the result is bound by
-compute or by memory bandwidth. TensorForge makes every one of those
-steps explicit and traceable to a formula, rather than hiding them behind
-a single opaque "runtime" number.
-
-## What it models
-
-- **GEMM**: MAC/FLOP counts, tensor byte footprints, an ideal roofline
-  model, rectangular PE-array mapping with spatial utilization, SRAM
-  capacity checks, explicit M/N/K tiling under three residency schedules
-  (`c-resident`/`a-resident`/`b-resident`) with exact DRAM traffic, and
-  analytical compute/memory timing.
-- **Transformer**: a GEMM-heavy block (Q/K/V/output projections,
-  attention scores/value, MLP up/down) decomposed from `batch`,
-  `sequence_length`, `d_model`, `num_heads`, `d_ff`, with per-operation
-  tile/schedule mapping on one shared, fixed PE array.
-- **Conv2D / CNN**: convolution lowered through an explicit
-  **materialized-im2col** GEMM mapping, plus a chained Conv-only CNN
-  workload representation.
-- **Bounded design-space exploration**: a deterministic search over
-  user-supplied tile/schedule/PE-array candidates, ranked by modeled
-  execution time.
-- **Reproducible presets and experiments**: named workload and
-  accelerator configurations that produce deterministic, machine-readable
-  JSON results.
-
-TensorForge is a design-space explorer and analytical modeling toolkit,
-not a cycle-accurate simulator, not an architecture optimizer, and not a
-complete Transformer/CNN inference simulator (see [Limitations](#limitations)).
-
-## Architecture
-
-```
-Workload (GEMM / Transformer / Conv2D / CNN)
-        |
-Gemm normalization  ->  PE mapping  ->  SRAM feasibility
-        |                                     |
-        +-------------- Tiling + schedule ----+
-                            |
-                          Timing
-                            |
-                  Bounded exploration
-                            |
-              Presets + deterministic experiments
-```
-
-See [docs/architecture.md](docs/architecture.md) for the full module map.
-
-## Example
-
-```bash
-python -m tensorforge --m 1024 --n 1024 --k 1024 --dtype fp16 \
-    --peak-tflops 10 --bandwidth-gbps 200 --pe-rows 32 --pe-cols 32
-```
-
-prints GEMM operation counts, tensor byte sizes, roofline ceilings,
-PE-array mapping and utilization, and a compute-bound/memory-bound
-classification.
-
-## Workloads
-
-- **GEMM** — `python -m tensorforge --m M --n N --k K ...`
-- **Transformer** — `python -m tensorforge --transformer-block --batch-size ... --seq-len ... --d-model ... --num-heads ... --d-ff ...`
-- **Conv2D** — `python -m tensorforge --conv2d --batch-size ... --in-channels ... --input-height ... --input-width ... --out-channels ... --kernel-h ... --kernel-w ...`
-
-Each mode accepts `--dtype`, `--peak-tflops`, `--bandwidth-gbps`, and
-optionally `--sram-kib`, `--pe-rows`/`--pe-cols`, tile candidate lists,
-and `--schedule-values`. See `python -m tensorforge --help`.
-
-## Accelerator model
-
-One global SRAM, one rectangular PE array (`1 PE = 1 MAC/cycle`, `1 MAC =
-2 FLOPs`), one DRAM bandwidth figure, one PE clock. Compute time is
-`compute_cycles / clock_hz`; memory time is `modeled_dram_bytes /
-bandwidth`; both a no-overlap (`serialized`) and full-overlap
-(`perfect_overlap`) bound are reported. See
-[docs/timing.md](docs/timing.md).
-
-## Mapping model
-
-A GEMM is split into `Tm x Tn x Tk` tiles that must fit the modeled SRAM.
-Three explicit, fully-specified loop schedules (`c-resident`,
-`a-resident`, `b-resident`) each produce a different, exactly-derived
-DRAM traffic total from the same arithmetic work. See
-[docs/tiling.md](docs/tiling.md) and [docs/schedules.md](docs/schedules.md).
-
-## Design-space exploration
-
-`explore()` evaluates the full Cartesian product of user-supplied tile,
-schedule, and PE-array candidates (bounded, with a hard size limit),
-ranks them deterministically by modeled execution time, and reports the
-**best among searched candidates** — never a claim of global optimality.
-See [docs/exploration.md](docs/exploration.md).
-
-## Reproducible experiments
-
-```bash
-python -m tensorforge --list-presets
-
-python -m tensorforge --workload-preset gemm_tiny --accelerator-preset balanced \
-    --tile-m-values 32,64,128 --tile-n-values 32,64,128 --tile-k-values 32,64,128
-
-python -m tensorforge --workload-preset transformer_medium --accelerator-preset compute_heavy \
-    --tile-m-values 32,64 --tile-n-values 32,64 --tile-k-values 32,64 \
-    --output-json result.json
-```
-
-Presets are generic, reproducible configurations (`gemm_tiny`,
-`transformer_medium`, `conv_spatial`, `cnn_like_small`, `small`,
-`balanced`, `compute_heavy`, `bandwidth_heavy`, ...) — not claims about
-any real model or chip. `--output-json` writes a deterministic result
-(`schema_version: 1`, sorted keys, no timestamps): the same experiment
-run twice produces byte-identical JSON.
-
-## Validation
-
-All validation is analytical: independently hand-derived known-value
-checks, closed-form invariant cross-checks, and scaling-law tests — no
-silicon validation. 223 tests currently pass (`pytest -q`). See
-[docs/validation.md](docs/validation.md) and
-[docs/experiments.md](docs/experiments.md) for the full studies,
-including a 4-accelerator x 4-workload tradeoff study, compute/memory
-crossover demonstrations, and SRAM/bandwidth/PE/sequence-length/kernel-size
-sensitivity sweeps.
+![TensorForge showcase presenting the canonical RTX 3050 predicted and measured latency comparison](docs/assets/tensorforge-showcase.png)
 
 ## What TensorForge demonstrates
 
-Roofline reasoning; PE-array spatial utilization and its sensitivity to
-array shape (not just PE count); SRAM capacity as a hard constraint on
-feasible tiling; how loop order/residency changes DRAM traffic for
-identical arithmetic; compute-bound vs. memory-bound classification and
-the crossover between them; bounded, deterministic architecture search;
-Transformer workload decomposition and quadratic-vs-linear scaling;
-convolution-to-GEMM lowering and its memory-footprint tradeoffs;
-reproducible, machine-readable performance experiments.
+- Analytical models can make each performance assumption explicit instead of
+  hiding everything behind one runtime number.
+- A deterministic Core can be kept independent from the optional measurement
+  and evidence stack around it.
+- Empirical calibration lets a lower-bound model be compared honestly with
+  physical execution.
+- Disagreement is useful evidence: the strongest result and the clearest model
+  boundary belong in the same report.
+- Missing prerequisites should produce `NOT EVALUATED`, not a manufactured
+  conclusion.
 
-## Limitations
+TensorForge models GEMM, Transformer, and materialized-im2col Conv2D/CNN
+workloads. It supports rectangular PE-array mapping, SRAM-constrained tiling,
+three explicit residency schedules, analytical timing, bounded design-space
+exploration, and deterministic JSON experiments.
 
-Every layer's limitations are documented in full in
-[docs/limitations.md](docs/limitations.md). In short: analytical only
-(not cycle-accurate); one global SRAM with no latency model;
-bandwidth-only DRAM timing; three fixed residency schedules over
-user-supplied, bounded candidates; Transformer/CNN modeling is GEMM-only
-(no softmax/normalization/activation/pooling/residual, no head
-parallelism, no fusion, no cross-operation SRAM residency); convolution
-uses one materialized-im2col lowering (no direct convolution, no
-grouped/depthwise/dilated convolution); no power/energy or area model;
-no real-hardware validation.
+## Real RTX 3050 validation
 
-## Repository structure
+The canonical capture used an NVIDIA GeForce RTX 3050 Laptop GPU, PyTorch
+2.14.1+cu130, CUDA 13.0, FP16, 10 warmups, and 50 measured iterations.
 
+| Workload | Predicted | Measured p50 | Measured p95 | APE | Measured / predicted |
+|---|---:|---:|---:|---:|---:|
+| `gemm_large_square` | 183.74 µs | 195.16 µs | 225.12 µs | 5.86% | 1.0622× |
+| `gemm_tiny` | 0.544 µs | 12.28 µs | 13.79 µs | 95.57% | 22.58× |
+
+The large workload tracks the calibrated lower bound closely, while the tiny
+workload exposes a major model boundary. Fixed framework or kernel-launch
+overhead is a plausible explanation for the latter result, but this capture
+does not establish that explanation as causal.
+
+The primary workload's `compute-bound` label is an analytical prediction, not
+a measured bottleneck claim.
+
+Calibration measured empirical ceilings of **11.687860 TFLOP/s** and
+**180.748794 GB/s** on this device. They are probe-derived rates, not vendor
+specifications or theoretical peaks.
+
+## Architecture
+
+```text
+TensorForge Core
+  workload → FLOPs + traffic → mapping + tiling → analytical result
+
+tensorforge_ops → tensorforge
+
+TensorForge Ops
+  benchmark → calibration → validation → regression
+            → telemetry → right-sizing → impact
 ```
-src/tensorforge/
-  gemm.py roofline.py pe_array.py memory.py     core analytical models
-  tiling.py timing.py explore.py                mapping, timing, search
-  transformer.py convolution.py                 workload decomposition
-  presets.py experiments.py                     reproducible experiments
-  cli.py                                         command-line interface
-tests/            one test file per module, 223 tests total
-docs/             per-topic model docs + architecture/design/validation/
-                  limitations/experiments
-scripts/          demo.sh, validate.sh
+
+The dependency direction is strictly `tensorforge_ops → tensorforge`, never
+the reverse. Core has no dependency on PyTorch, MLflow, NVML, or Ops and remains
+usable as a standalone analytical package.
+
+See the [Core architecture](docs/architecture.md) and
+[Ops architecture](docs/ops/README.md) for the implementation map.
+
+## How the model works
+
+For each normalized GEMM, TensorForge derives operation counts and tensor
+traffic, maps the work onto a rectangular PE array, checks SRAM feasibility,
+and evaluates tiling and loop-residency choices. Timing is then bounded by:
+
+```text
+compute time = mapped compute cycles / PE clock
+memory time  = modeled DRAM bytes / effective bandwidth
+lower bound  = max(compute time, memory time)
 ```
+
+Core also reports serialized and perfect-overlap timing bounds. Transformer
+blocks and CNN workloads are decomposed into ordered GEMMs and evaluated on one
+fixed array; their operation times are summed without claiming cross-operation
+fusion or SRAM residency.
+
+The search covers a bounded, user-supplied Cartesian product of tiles,
+schedules, and PE-array shapes. A result is the best searched candidate, never
+a claim of global optimality. Formula details live in
+[timing](docs/timing.md), [tiling](docs/tiling.md), and
+[schedules](docs/schedules.md).
+
+## TensorForge Ops
+
+Ops surrounds a deterministic Core result with real measurement and explicit
+evidence boundaries:
+
+- **Benchmarking** runs the corresponding workload with PyTorch/CUDA and
+  records latency, throughput, and CUDA memory.
+- **Calibration** measures device-specific compute and memory-copy ceilings.
+- **Validation** compares predicted and measured latency without tuning a
+  workload-specific fudge factor.
+- **Regression policy** gates only on comparable measured evidence.
+- **Telemetry** records NVML diagnostics in a separate execution phase.
+- **Right-sizing and impact** run only when their prerequisites exist.
+
+The showcase uses five labels consistently:
+
+| Label | Meaning |
+|---|---|
+| `PREDICTED` | Analytical Core output |
+| `MEASURED` | Physical PyTorch/CUDA execution |
+| `CALIBRATED` | Empirical device probe result |
+| `DIAGNOSTIC` | Separate NVML telemetry context |
+| `POLICY` | A decision derived only when its required evidence exists |
+
+The canonical capture deliberately leaves these outcomes incomplete:
+
+| Stage | Status | Reason |
+|---|---|---|
+| Regression | `NOT EVALUATED` | No defensible performance-changing historical baseline |
+| Right-sizing | `OMITTED` | Only one physical device was measured |
+| Impact | `NOT EVALUATED` | A measured regression result is required |
+
+This is evidence discipline, not a hidden pass or failure. The capture fails
+closed when required hardware is unavailable. A historical performance
+baseline is optional; if no defensible baseline exists, measurement and
+validation proceed while regression and impact remain explicitly unevaluated.
 
 ## Quick start
+
+Core requires Python 3.11 or newer:
 
 ```bash
 python -m venv .venv
@@ -184,69 +144,86 @@ source .venv/bin/activate
 pip install -e .
 pytest -q
 
-python -m tensorforge --list-presets
-python -m tensorforge --workload-preset gemm_tiny --accelerator-preset balanced \
-    --tile-m-values 32,64,128 --tile-n-values 32,64,128 --tile-k-values 32,64,128
-
-bash scripts/demo.sh
+python -m tensorforge --workload-preset gemm_tiny \
+  --accelerator-preset balanced \
+  --tile-m-values 32,64,128 \
+  --tile-n-values 32,64,128 \
+  --tile-k-values 32,64,128
 ```
 
-For the end-to-end CUDA portfolio experiment, see
-[`tools/demo/README.md`](tools/demo/README.md). Its capture command composes the
-existing Core and Ops implementations into a sanitized evidence bundle and
-deliberately fails when CUDA/NVML or a genuine prior-revision baseline is not
-available.
-
-## TensorForge Ops (Phase 2)
-
-TensorForge Core (`src/tensorforge/`) is frozen as a standalone
-analytical modeling engine. `tensorforge_ops` (`src/tensorforge_ops/`)
-is a separate package built *around* Core -- the dependency direction is
-strictly `tensorforge_ops -> tensorforge`, never the reverse; Core never
-imports MLflow, PyTorch, or `tensorforge_ops`, and continues to run and
-pass its full test suite with none of those installed.
-
-Ops turns a deterministic Core result into an evidence trail around one
-code/model change: log it to MLflow, actually run the workload and
-measure real latency/throughput/memory, calibrate that against this
-device's own measured compute/memory rates, gate a pull request on
-measured (never predicted) performance, correlate GPU telemetry as
-diagnostic context, plan the cheapest deployment that meets an explicit
-SLO, and finally compose all of that into one model-change report. Every
-stage stays evidence-based and explicit -- no hidden thresholds, no
-composite score, and **no claim about model quality, correctness, or
-business value**; Ops answers "did performance regress, what does
-serving it cost, and what do we still not know," nothing more.
+Install optional Ops dependencies only for the workflows that need them:
 
 ```bash
-pip install -e ".[ops]"
-mlflow server --host 127.0.0.1 --port 5000 &
-export MLFLOW_TRACKING_URI=http://127.0.0.1:5000
-python -m tensorforge_ops track --workload-preset gemm_tiny --accelerator-preset balanced \
-    --tile-m-values 32,64,128 --tile-n-values 32,64,128 --tile-k-values 32,64,128
+pip install -e '.[ops,benchmark,telemetry]'
+python tools/demo/summarize.py docs/evidence/canonical
+python tools/demo/validate.py docs/evidence/canonical
 ```
 
-```
-code/model change
-      |
-real benchmark: baseline vs candidate (measured latency/throughput/memory)
-      |
-regression result (PASS / FAIL / ERROR, measured metrics only)
-      |
-GPU telemetry + prediction-vs-measurement validation (context, never a gate)
-      |
-deployment right-sizing against an explicit SLO (measured cost/replicas)
-      |
-model-change impact report: PERFORMANCE_READY / PERFORMANCE_BLOCKED / REVIEW_REQUIRED
+The committed canonical bundle is the portfolio evidence. Its capture process
+requires CUDA and NVML and never silently falls back to CPU. See the
+[capture guide](tools/demo/README.md) before attempting a new capture.
+
+## Evidence and verification
+
+The canonical evidence bundle is committed under
+[`docs/evidence/canonical`](docs/evidence/canonical/README.md). Its manifest
+records the device, runtime, workload roles, capture source revision, and
+policy state. `SHA256SUMS` covers 13 artifacts.
+
+TensorForge Core is validated with analytical invariants, independently
+derived known-value checks, and scaling-law tests. TensorForge Ops separately
+validates predictions against measured PyTorch/CUDA execution. The repository
+test suite covers Core models, Ops evidence tooling, regression policy,
+telemetry, and canonical capture orchestration.
+
+Useful verification commands:
+
+```bash
+pytest -q
+pytest -q tests/test_demo_tools.py
+bash scripts/validate.sh
+python tools/demo/validate.py docs/evidence/canonical
+git diff --check
 ```
 
-See [docs/ops/README.md](docs/ops/README.md) for the full package layout
-and every milestone doc, including
-[docs/ops/mlflow-tracking.md](docs/ops/mlflow-tracking.md) and
-[docs/ops/model-change-impact.md](docs/ops/model-change-impact.md).
+The GitHub Pages showcase reads the committed JSON artifacts rather than
+duplicating their numeric values in JavaScript.
 
-Ops is a set of composable evidence and gating tools, not a fully
-automated MLOps platform: it does not train models, does not deploy
-anything, does not fetch live cloud prices, and does not decide whether
-a model change is *good* -- only whether measured performance and
-deployment evidence support calling it performance-ready.
+## Limits of claim
+
+TensorForge Core's generic accelerator model is not a silicon-validated,
+cycle-accurate representation of the RTX 3050. TensorForge Ops compares Core
+predictions against real PyTorch/CUDA measurements; the existence of that
+measurement does not make the architecture model silicon accurate.
+
+The canonical result covers one physical laptop GPU and one capture session.
+Laptop thermal and power state can affect measurements. The 35 NVML samples
+are diagnostic context from a separate run; they do not prove the analytical
+bottleneck, and the observed `SwPowerCap` event does not prove the workload was
+power-limited. The evidence does not establish production capacity, model
+quality, business value, or generalization to every RTX 3050 Laptop GPU.
+
+Additional model boundaries include one global SRAM, bandwidth-only DRAM
+timing, fixed residency schedules, no power/energy or area model, no softmax,
+normalization, activation, pooling, residual, or fusion timing, and only
+materialized-im2col convolution. See [all limitations](docs/limitations.md).
+
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [Core model and validation](docs/model.md) · [validation](docs/validation.md)
+- [Memory](docs/memory.md) · [tiling](docs/tiling.md) ·
+  [schedules](docs/schedules.md) · [timing](docs/timing.md)
+- [Transformer](docs/transformer.md) · [convolution](docs/convolution.md)
+- [Design-space exploration](docs/exploration.md) ·
+  [reproducible experiments](docs/experiments.md)
+- [TensorForge Ops](docs/ops/README.md)
+- [Canonical capture methodology](tools/demo/README.md)
+- [Recording guide](docs/recording.md)
+- [Complete limitations](docs/limitations.md)
+
+## Project status
+
+TensorForge is feature-frozen for portfolio purposes. Future changes are
+limited to bug fixes, compatibility fixes, documentation corrections, and
+evidence replacement after a meaningful methodology or implementation change.

@@ -74,7 +74,7 @@
       </div>
     </section>
 
-    <section class="calibration ruled" aria-labelledby="calibration-title">
+    <section class="calibration ruled" id="calibration" aria-labelledby="calibration-title">
       <header class="section-head"><span>03 / EMPIRICAL CALIBRATION</span><h2 id="calibration-title">Measured ceilings, not marketing peaks.</h2></header>
       <div class="calibration-grid">
         <article><span>COMPUTE PROBE · MEASURED EMPIRICAL CEILING</span><strong id="compute-rate">—</strong><p id="compute-probe">—</p></article>
@@ -82,7 +82,7 @@
       </div>
     </section>
 
-    <section class="anatomy ruled" aria-labelledby="anatomy-title">
+    <section class="anatomy ruled" id="anatomy" aria-labelledby="anatomy-title">
       <header class="section-head"><span>04 / PREDICTION ANATOMY</span><h2 id="anatomy-title">From workload description to lower bound.</h2></header>
       <div class="flow" role="img" aria-label="Workload flows through FLOPs and traffic, mapping and tiling, empirical calibration, and maximum compute or memory time to predicted latency.">
         <div>WORKLOAD</div><i>↓</i><div>FLOPs + TRAFFIC</div><i>↓</i><div>MAPPING + TILING</div><i>↓</i><div>CALIBRATION CEILINGS</div><i>↓</i><div>MAX(COMPUTE, MEMORY)</div><i>↓</i><div>PREDICTED LATENCY</div>
@@ -101,7 +101,7 @@
       </div>
     </section>
 
-    <section class="policy-section ruled" aria-labelledby="policy-title">
+    <section class="policy-section ruled" id="policy" aria-labelledby="policy-title">
       <header class="section-head"><span>06 / EVIDENCE BOUNDARIES</span><h2 id="policy-title">No evidence, no verdict.</h2></header>
       <div class="policy-grid">
         <article><span>REGRESSION</span><strong id="regression-status">—</strong><p id="regression-reason">—</p></article>
@@ -110,7 +110,7 @@
       </div>
     </section>
 
-    <section class="architecture ruled" aria-labelledby="architecture-title">
+    <section class="architecture ruled" id="architecture" aria-labelledby="architecture-title">
       <header class="section-head"><span>07 / SYSTEM ARCHITECTURE</span><h2 id="architecture-title">Ops wraps Core. Core remains independent.</h2></header>
       <div class="architecture-scroll" tabindex="0" aria-label="TensorForge architecture diagram; scroll horizontally on small screens">
         <div class="architecture-diagram">
@@ -131,7 +131,7 @@
       <div class="actions"><a class="button dark" href="https://github.com/nhatminh06/tensorforge/tree/main/docs/evidence/canonical">Canonical evidence</a><a class="button" href="https://github.com/nhatminh06/tensorforge/blob/main/docs/evidence/canonical/README.md">Evidence methodology</a></div>
     </section>
 
-    <section class="limitations ruled" aria-labelledby="limitations-title">
+    <section class="limitations ruled" id="limitations" aria-labelledby="limitations-title">
       <header class="section-head"><span>09 / LIMITS OF CLAIM</span><h2 id="limitations-title">What this capture does not establish.</h2></header>
       <ul><li>One physical GPU and one capture session</li><li>Laptop thermal and power state affect measurements</li><li>Analytical lower bound—not cycle accurate</li><li>Not a GPU simulator</li><li>No measured-bottleneck claim</li><li>No generalization to every RTX 3050 laptop</li><li>No production capacity claim</li><li>No model-quality assessment</li></ul>
     </section>
